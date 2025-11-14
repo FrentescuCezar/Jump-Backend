@@ -7,6 +7,8 @@ import { RegisteredUserDto } from "./dto/registered-user.dto"
 import { AppError } from "../errors/app-error"
 import { ErrorCodes, FieldErrorCodes } from "../errors/error-codes"
 import { UserMapper } from "./user.mapper"
+import type { AuthenticatedUser } from "../common/types/authenticated-user"
+import type UserRepresentation from "@keycloak/keycloak-admin-client/lib/defs/userRepresentation"
 
 @Injectable()
 export class UsersService {
@@ -28,6 +30,107 @@ export class UsersService {
       this.handleDatabaseError(error)
       throw error
     }
+  }
+
+  async ensureUserEntity(authUser: AuthenticatedUser): Promise<User> {
+    if (!authUser?.sub) {
+      throw new AppError(ErrorCodes.BAD_REQUEST, {
+        params: { resource: "Keycloak subject" },
+      })
+    }
+
+    const existing = await this.prisma.user.findUnique({
+      where: { keycloakId: authUser.sub },
+    })
+    if (existing) {
+      return existing
+    }
+
+    const profile = await this.keycloakAdmin.findUserById(authUser.sub)
+    const email = profile.email ?? authUser.email
+    if (!email) {
+      throw new AppError(ErrorCodes.BAD_REQUEST, {
+        fields: [{ field: "email", code: FieldErrorCodes.REQUIRED }],
+      })
+    }
+
+    const name = this.buildDisplayName({
+      firstName: profile.firstName ?? authUser.given_name,
+      lastName: profile.lastName ?? authUser.family_name,
+      fallback:
+        profile.username ??
+        authUser.preferred_username ??
+        profile.email ??
+        authUser.name ??
+        email,
+    })
+
+    const brand =
+      this.extractAttributeValue(profile.attributes, "brand") ?? "default"
+
+    try {
+      return await this.prisma.user.create({
+        data: {
+          keycloakId: authUser.sub,
+          email,
+          name,
+          brand,
+        },
+      })
+    } catch (error) {
+      const recovered = await this.recoverOnDuplicate(authUser.sub, error)
+      if (recovered) {
+        return recovered
+      }
+      this.handleDatabaseError(error)
+      throw error
+    }
+  }
+
+  private async recoverOnDuplicate(
+    keycloakId: string,
+    error: unknown,
+  ): Promise<User | null> {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      const existing = await this.prisma.user.findUnique({
+        where: { keycloakId },
+      })
+      if (existing) {
+        return existing
+      }
+    }
+    return null
+  }
+
+  private buildDisplayName({
+    firstName,
+    lastName,
+    fallback,
+  }: {
+    firstName?: string
+    lastName?: string
+    fallback: string
+  }) {
+    const parts = [firstName, lastName].filter(Boolean).join(" ").trim()
+    return parts.length ? parts : fallback
+  }
+
+  private extractAttributeValue(
+    attributes: UserRepresentation["attributes"] | undefined,
+    key: string,
+  ): string | undefined {
+    if (!attributes) return undefined
+    const value = attributes[key]
+    if (Array.isArray(value)) {
+      return value[0]
+    }
+    if (typeof value === "string") {
+      return value
+    }
+    return undefined
   }
 
   private async validateEmailNotExists(email: string): Promise<void> {

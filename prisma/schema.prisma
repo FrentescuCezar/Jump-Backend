@@ -21,6 +21,11 @@ model User {
   brand      String
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  connectedAccounts ConnectedAccount[]
+  calendarEvents    CalendarEvent[]
+  meetingPreference MeetingPreference?
+  automations       Automation[]
+  socialPosts       SocialPost[]
 }
 
 model PlannerProject {
@@ -86,6 +91,214 @@ model ChatMessage {
   room       ChatRoom  @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([roomId, createdAt])
+}
+
+enum ConnectedProvider {
+  GOOGLE_CALENDAR
+  LINKEDIN
+  FACEBOOK
+}
+
+enum MeetingPlatform {
+  ZOOM
+  GOOGLE_MEET
+  MICROSOFT_TEAMS
+  UNKNOWN
+}
+
+enum CalendarEventStatus {
+  UPCOMING
+  COMPLETED
+  CANCELLED
+}
+
+enum RecallBotStatus {
+  SCHEDULED
+  JOINING
+  IN_CALL
+  DONE
+  FATAL
+  CANCELLED
+}
+
+enum MeetingMediaType {
+  TRANSCRIPT
+  VIDEO
+  PARTICIPANT_EVENTS
+  AUDIO
+  METADATA
+}
+
+enum MeetingMediaStatus {
+  PENDING
+  STORED
+  FAILED
+}
+
+enum SocialChannel {
+  LINKEDIN
+  FACEBOOK
+}
+
+enum SocialPostStatus {
+  DRAFT
+  READY
+  POSTING
+  POSTED
+  FAILED
+}
+
+model ConnectedAccount {
+  id                 String            @id @default(uuid())
+  userId             String
+  provider           ConnectedProvider
+  providerAccountId  String
+  label              String?
+  scopes             String[]          @default([])
+  accessToken        String?
+  refreshToken       String?
+  expiresAt          DateTime?
+  lastSyncedAt       DateTime?
+  metadata           Json?
+  linkedAt           DateTime          @default(now())
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendarEvents     CalendarEvent[]
+
+  @@index([userId, provider])
+  @@unique([provider, providerAccountId])
+}
+
+model MeetingPreference {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  leadMinutes         Int      @default(10)
+  defaultNotetaker    Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CalendarEvent {
+  id                  String              @id @default(uuid())
+  userId              String
+  connectedAccountId  String
+  externalEventId     String
+  calendarId          String?
+  calendarTitle       String?
+  title               String?
+  description         String?
+  location            String?
+  meetingUrl          String?
+  meetingPlatform     MeetingPlatform     @default(UNKNOWN)
+  htmlLink            String?
+  startTime           DateTime
+  endTime             DateTime
+  timezone            String?
+  attendees           Json?
+  reminders           Json?
+  recurrence          Json?
+  creatorEmail        String?
+  creatorDisplayName  String?
+  deduplicationKey    String
+  status              CalendarEventStatus @default(UPCOMING)
+  notetakerEnabled    Boolean             @default(false)
+  metadata            Json?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectedAccount    ConnectedAccount    @relation(fields: [connectedAccountId], references: [id], onDelete: Cascade)
+  recallBot           RecallBot?
+  meetingInsights     MeetingInsight[]
+  socialPosts         SocialPost[]
+
+  @@unique([connectedAccountId, externalEventId])
+  @@index([userId, startTime])
+  @@index([deduplicationKey])
+}
+
+model RecallBot {
+  id               String           @id
+  calendarEventId  String           @unique
+  status           RecallBotStatus  @default(SCHEDULED)
+  scheduledBy      String?
+  joinAt           DateTime
+  meetingUrl       String
+  meetingPlatform  MeetingPlatform  @default(UNKNOWN)
+  leadTimeMinutes  Int              @default(10)
+  metadata         Json?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  calendarEvent    CalendarEvent    @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+  media            MeetingMedia[]
+}
+
+model MeetingMedia {
+  id          String             @id @default(uuid())
+  recallBotId String
+  type        MeetingMediaType
+  status      MeetingMediaStatus @default(PENDING)
+  downloadUrl String?
+  storagePath String?
+  expiresAt   DateTime?
+  payload     Json?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  recallBot   RecallBot          @relation(fields: [recallBotId], references: [id], onDelete: Cascade)
+
+  @@index([recallBotId, type])
+}
+
+model MeetingInsight {
+  id              String        @id @default(uuid())
+  calendarEventId String
+  summary         String?
+  followUpEmail   String?
+  actionItems     Json?
+  generatedAt     DateTime?
+  metadata        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  calendarEvent   CalendarEvent @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+}
+
+model Automation {
+  id             String        @id @default(uuid())
+  userId         String
+  name           String
+  channel        SocialChannel
+  isEnabled      Boolean       @default(true)
+  promptTemplate String
+  config         Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  socialPosts    SocialPost[]
+
+  @@index([userId, channel])
+}
+
+model SocialPost {
+  id              String           @id @default(uuid())
+  calendarEventId String
+  userId          String
+  automationId    String?
+  channel         SocialChannel
+  content         String
+  status          SocialPostStatus @default(DRAFT)
+  error           String?
+  externalPostId  String?
+  publishedAt     DateTime?
+  metadata        Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  calendarEvent   CalendarEvent    @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+  automation      Automation?      @relation(fields: [automationId], references: [id], onDelete: SetNull)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([calendarEventId, status])
+  @@index([userId, channel])
 }
 
 model Notification {

@@ -78,6 +78,40 @@ export class KeycloakAdminService {
     }
   }
 
+  async findUserById(id: string): Promise<UserRepresentation> {
+    await this.authenticate()
+    try {
+      const user = await this.client.users.findOne({
+        realm: this.realm,
+        id,
+      })
+
+      if (!user) {
+        throw new AppError(ErrorCodes.NOT_FOUND, {
+          params: { resource: "Keycloak user" },
+        })
+      }
+
+      return user
+    } catch (error) {
+      const status = this.extractStatus(error)
+      if (status === HttpStatus.NOT_FOUND) {
+        throw new AppError(ErrorCodes.NOT_FOUND, {
+          params: { resource: "Keycloak user" },
+        })
+      }
+
+      const debugInfo = this.formatDebug(error)
+      this.logger.error(
+        `Unexpected error while fetching Keycloak user ${id}`,
+        debugInfo,
+      )
+      throw new AppError(ErrorCodes.INTERNAL, {
+        debug: debugInfo,
+      })
+    }
+  }
+
   async deleteUser(id: string): Promise<void> {
     if (!id) return
 

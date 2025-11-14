@@ -11,7 +11,7 @@ services:
     working_dir: /app
     volumes:
       - ../../:/app
-      - ../../node_modules:/app/node_modules
+      - backend-node-modules:/app/node_modules
       - ../../generated:/app/generated
     networks:
       - jump-network
@@ -21,6 +21,9 @@ services:
       retries: 5
       timeout: 5s
       start_period: 30s
+
+volumes:
+  backend-node-modules:
 
 networks:
   jump-network:

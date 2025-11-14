@@ -13,6 +13,10 @@ import { PrismaModule } from "../prisma/prisma.module"
 import { KeycloakModule } from "./keycloak/keycloak.module"
 import { UsersModule } from "./users/users.module"
 import { ExamplesModule } from "./examples/examples.module"
+import { ScheduleModule } from "@nestjs/schedule"
+import { IntegrationsModule } from "./integrations/integrations.module"
+import { CalendarModule } from "./calendar/calendar.module"
+import { RecallModule } from "./recall/recall.module"
 
 @Module({
   imports: [
@@ -25,10 +29,14 @@ import { ExamplesModule } from "./examples/examples.module"
       ],
       cache: true,
     }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     KeycloakModule,
     UsersModule,
     ExamplesModule,
+    IntegrationsModule,
+    CalendarModule,
+    RecallModule,
     KeycloakConnectModule.registerAsync({
       useFactory: (configService: ConfigService) => {
         return {
