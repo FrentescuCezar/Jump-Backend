@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ../..
+      dockerfile: ./infra/dev/Dockerfile
+    container_name: Jump-Backend
+    ports:
+      - "${PORT:-3001}:3001"
+    env_file:
+      - ../../.env
+    working_dir: /app
+    volumes:
+      - ../../:/app
+      - ../../node_modules:/app/node_modules
+      - ../../generated:/app/generated
+    networks:
+      - jump-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001 || exit 1"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+      start_period: 30s
+
+networks:
+  jump-network:
+    name: jump-network
+    external: true

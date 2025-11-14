@@ -1,0 +1,106 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String   @id @default(uuid())
+  keycloakId String   @unique
+  email      String   @unique
+  name       String
+  brand      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model PlannerProject {
+  id              String             @id @default(cuid())
+  name            String
+  color           String
+  defaultActivity String
+  blockedBy       String[]           @default([])
+  templates       PlannerTemplate[]
+  entries         PlannerEntry[]
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+}
+
+model PlannerTemplate {
+  id           String         @id @default(cuid())
+  name         String
+  icon         String
+  activityType String
+  hours        Float
+  description  String
+  projectId    String
+  project      PlannerProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+}
+
+model PlannerEntry {
+  id           String         @id @default(cuid())
+  userId       String
+  date         DateTime       @db.Date
+  activityType String
+  hours        Float
+  description  String
+  projectId    String
+  project      PlannerProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([userId, date])
+  @@index([date])
+}
+
+model ChatRoom {
+  id           String        @id @default(cuid())
+  slug         String        @unique
+  name         String
+  description  String
+  theme        String
+  participants String[]      @default([])
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  messages     ChatMessage[]
+}
+
+model ChatMessage {
+  id         String    @id @default(cuid())
+  roomId     String
+  senderId   String
+  senderName String
+  body       String
+  createdAt  DateTime  @default(now())
+  room       ChatRoom  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  roomSlug  String?
+  messageId String?
+  payload   Json
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}

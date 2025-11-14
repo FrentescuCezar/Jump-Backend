@@ -1,0 +1,16 @@
+FROM node:24-alpine
+WORKDIR /app
+
+RUN corepack enable
+
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN if [ -f package-lock.json ]; then npm install; \
+    elif [ -f pnpm-lock.yaml ]; then corepack pnpm install; \
+    elif [ -f yarn.lock ]; then corepack yarn install; \
+    else npm install; \
+    fi
+
+EXPOSE 3001
+CMD ["sh", "-c", "npx prisma generate && npm run start:dev"]
+
+
