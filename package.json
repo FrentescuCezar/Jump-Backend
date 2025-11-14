@@ -34,6 +34,8 @@
     "@nestjs/platform-socket.io": "^11.0.1",
     "@nestjs/websockets": "^11.0.1",
     "@nestjs/swagger": "^11.2.1",
+    "@nestjs/axios": "^3.1.0",
+    "@nestjs/schedule": "^4.0.0",
     "@prisma/client": "^6.19.0",
     "date-fns": "^3.6.0",
     "@keycloak/keycloak-admin-client": "^26.0.2",
@@ -45,7 +47,12 @@
     "nest-keycloak-connect": "^2.0.0-alpha.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "axios": "^1.7.9",
+    "googleapis": "^140.0.0",
+    "openai": "^4.79.1",
+    "svix": "^1.26.0",
+    "p-queue": "^8.0.1"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.6",
