@@ -7,11 +7,16 @@ import {
   CalendarEventStatus,
   MeetingMediaStatus,
   MeetingMediaType,
+  MeetingMedia,
   Prisma,
   RecallBotStatus,
   RecallBot,
 } from "@prisma/client"
 import { AxiosRequestConfig } from "axios"
+import type { Response } from "express"
+import { AiContentService } from "../ai/ai-content.service"
+import { AppError } from "../errors/app-error"
+import { ErrorCodes } from "../errors/error-codes"
 
 @Injectable()
 export class RecallService {
@@ -24,6 +29,7 @@ export class RecallService {
     private readonly configService: ConfigService,
     private readonly http: HttpService,
     private readonly prisma: PrismaService,
+    private readonly aiContent: AiContentService,
   ) {
     this.apiKey = this.configService.getOrThrow<string>("RECALL_API_KEY")
     const region =
@@ -56,11 +62,34 @@ export class RecallService {
       return existingBot
     }
 
-    const payload = {
+    const preference = await this.prisma.meetingPreference.findUnique({
+      where: { userId: event.userId },
+      select: { leadMinutes: true },
+    })
+    const leadMinutes = preference?.leadMinutes ?? this.leadMinutesDefault
+
+    const now = new Date()
+    const intendedJoinTime = new Date(
+      event.startTime.getTime() - leadMinutes * 60 * 1000,
+    )
+    const adHocThresholdMs = 5 * 60 * 1000 // five-minute buffer
+
+    if (event.startTime.getTime() <= now.getTime()) {
+      this.logger.warn(
+        `Skipping scheduling for event ${event.id}: start time ${event.startTime.toISOString()} already passed`,
+      )
+      return null
+    }
+
+    let joinAtPayload: string | undefined
+    if (intendedJoinTime.getTime() > now.getTime() + adHocThresholdMs) {
+      joinAtPayload = intendedJoinTime.toISOString()
+    } else {
+      joinAtPayload = undefined
+    }
+
+    const payload: Record<string, unknown> = {
       meeting_url: event.meetingUrl,
-      join_at: new Date(
-        event.startTime.getTime() - this.leadMinutesDefault * 60 * 1000,
-      ).toISOString(),
       bot_name: "Jump Notetaker",
       metadata: {
         calendarEventId: event.id,
@@ -76,6 +105,10 @@ export class RecallService {
       },
     }
 
+    if (joinAtPayload) {
+      payload.join_at = joinAtPayload
+    }
+
     const response = await this.http.axiosRef.post(
       `${this.apiBaseUrl}/bot`,
       payload,
@@ -88,9 +121,10 @@ export class RecallService {
       data: {
         id: response.data.id,
         calendarEventId: event.id,
-        joinAt: new Date(payload.join_at),
+        joinAt: intendedJoinTime,
         meetingUrl: event.meetingUrl,
         meetingPlatform: event.meetingPlatform,
+        leadTimeMinutes: leadMinutes,
         status: RecallBotStatus.SCHEDULED,
       },
     })
@@ -225,6 +259,16 @@ export class RecallService {
       where: { id: recallBot.calendarEventId },
       data: { status: CalendarEventStatus.COMPLETED },
     })
+
+    try {
+      this.aiContent.queueMeetingGeneration(recallBot.calendarEventId)
+    } catch (error) {
+      this.logger.error(
+        `Failed to enqueue AI job for event ${recallBot.calendarEventId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
   }
 
   private async upsertMeetingMedia(
@@ -268,6 +312,45 @@ export class RecallService {
       })
     } else {
       await this.prisma.meetingMedia.create({ data: mediaCreate })
+    }
+  }
+
+  async proxyMediaDownload(
+    media: MeetingMedia,
+    response: Response,
+    options?: { fallbackContentType?: string },
+  ) {
+    if (!media.downloadUrl) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "MeetingMedia" },
+      })
+    }
+
+    try {
+      const upstream = await this.http.axiosRef.get(media.downloadUrl, {
+        responseType: "stream",
+      })
+      const contentType =
+        (upstream.headers["content-type"] as string | undefined) ??
+        options?.fallbackContentType ??
+        "application/octet-stream"
+      response.setHeader("Content-Type", contentType)
+      if (upstream.headers["content-length"]) {
+        response.setHeader(
+          "Content-Length",
+          upstream.headers["content-length"] as string,
+        )
+      }
+      upstream.data.pipe(response)
+    } catch (error) {
+      this.logger.error(
+        `Failed to proxy media ${media.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      throw new AppError(ErrorCodes.SERVICE_UNAVAILABLE, {
+        params: { resource: "MeetingMedia" },
+      })
     }
   }
   private extractLatestStatus(
