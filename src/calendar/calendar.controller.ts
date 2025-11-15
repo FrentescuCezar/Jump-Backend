@@ -30,10 +30,23 @@ export class CalendarController {
     @CurrentDbUser() user: User,
   ): Promise<CalendarEventsPayloadDto> {
     const events = await this.calendarService.listUpcomingEvents(user.id)
-    return {
-      events: events.map((event) => this.toCalendarEventDto(event)),
-      serverTimestamp: new Date().toISOString(),
-    }
+    return this.buildEventsPayload(events)
+  }
+
+  @Get("events/upcoming")
+  async listUpcoming(
+    @CurrentDbUser() user: User,
+  ): Promise<CalendarEventsPayloadDto> {
+    const events = await this.calendarService.listUpcomingEvents(user.id)
+    return this.buildEventsPayload(events)
+  }
+
+  @Get("events/past")
+  async listPast(
+    @CurrentDbUser() user: User,
+  ): Promise<CalendarEventsPayloadDto> {
+    const events = await this.calendarService.listPastEvents(user.id)
+    return this.buildEventsPayload(events)
   }
 
   @Get("events/delta-sync")
@@ -102,6 +115,20 @@ export class CalendarController {
       recurrence: (event as any).recurrence as string[] | null,
       creatorEmail: (event as any).creatorEmail ?? null,
       creatorDisplayName: (event as any).creatorDisplayName ?? null,
+    }
+  }
+
+  private buildEventsPayload(
+    events: Array<
+      CalendarEvent & {
+        recallBot: RecallBot | null
+        connectedAccount: ConnectedAccount
+      }
+    >,
+  ): CalendarEventsPayloadDto {
+    return {
+      events: events.map((event) => this.toCalendarEventDto(event)),
+      serverTimestamp: new Date().toISOString(),
     }
   }
 }
