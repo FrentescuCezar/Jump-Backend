@@ -84,18 +84,46 @@ export class RecallService {
       },
     )
 
-    const bot = await this.prisma.recallBot.create({
-      data: {
-        id: response.data.id,
-        calendarEventId: event.id,
-        joinAt: new Date(payload.join_at),
-        meetingUrl: event.meetingUrl,
-        meetingPlatform: event.meetingPlatform,
-        status: RecallBotStatus.SCHEDULED,
-      },
-    })
-
-    return bot
+    // Ensure a unique bot ID (fallback if API doesn't return one)
+    let botId: string | undefined = (response as any)?.data?.id
+    if (!botId) {
+      botId = `bot-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
+    }
+    try {
+      const bot = await this.prisma.recallBot.create({
+        data: {
+          id: botId,
+          calendarEventId: event.id,
+          joinAt: new Date(payload.join_at),
+          meetingUrl: event.meetingUrl,
+          meetingPlatform: event.meetingPlatform,
+          leadTimeMinutes: this.leadMinutesDefault,
+          status: RecallBotStatus.SCHEDULED,
+        },
+      })
+      return bot
+    } catch (error) {
+      // Retry once if a race condition caused a duplicate ID
+      if (
+        (error as any).code === "P2002" &&
+        (error as any).meta?.modelName === "RecallBot"
+      ) {
+        const retryId = `bot-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
+        const bot = await this.prisma.recallBot.create({
+          data: {
+            id: retryId,
+            calendarEventId: event.id,
+            joinAt: new Date(payload.join_at),
+            meetingUrl: event.meetingUrl,
+            meetingPlatform: event.meetingPlatform,
+            leadTimeMinutes: this.leadMinutesDefault,
+            status: RecallBotStatus.SCHEDULED,
+          },
+        })
+        return bot
+      }
+      throw error
+    }
   }
 
   async cancelBotForEvent(eventId: string) {
