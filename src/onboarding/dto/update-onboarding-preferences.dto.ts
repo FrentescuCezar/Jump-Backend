@@ -22,3 +22,4 @@ export class UpdateOnboardingPreferencesDto {
   @IsBoolean()
   completeOnboarding?: boolean
 }
+

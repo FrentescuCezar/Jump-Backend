@@ -24,3 +24,4 @@ export class OnboardingController {
     return this.onboarding.updatePreferences(user.id, body)
   }
 }
+

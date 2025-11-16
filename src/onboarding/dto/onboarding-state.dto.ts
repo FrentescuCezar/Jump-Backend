@@ -29,3 +29,4 @@ export class OnboardingStateDto {
   meetingPreference!: MeetingPreferenceDto
   automationPreferences!: OnboardingAutomationPreferencesDto
 }
+
