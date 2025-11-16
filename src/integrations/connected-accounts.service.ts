@@ -32,6 +32,16 @@ export class ConnectedAccountsService {
     })
   }
 
+  async findLatestByProvider(
+    userId: string,
+    provider: ConnectedProvider,
+  ): Promise<ConnectedAccount | null> {
+    return this.prisma.connectedAccount.findFirst({
+      where: { userId, provider },
+      orderBy: { linkedAt: "desc" },
+    })
+  }
+
   async upsertAccount(
     userId: string,
     provider: ConnectedProvider,
