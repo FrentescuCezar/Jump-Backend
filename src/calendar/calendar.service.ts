@@ -60,6 +60,26 @@ export class CalendarService {
     })
   }
 
+  listPastEvents(userId: string) {
+    const now = new Date()
+    return this.prisma.calendarEvent.findMany({
+      where: {
+        userId,
+        startTime: {
+          lt: new Date(now.getTime() - 60 * 60 * 1000),
+        },
+      },
+      include: {
+        recallBot: true,
+        connectedAccount: true,
+      },
+      orderBy: {
+        startTime: "desc",
+      },
+      take: 50,
+    })
+  }
+
   listUpdatedEvents(userId: string, updatedSince: Date) {
     const now = new Date()
     const windowStart = new Date(now.getTime() - 60 * 60 * 1000)

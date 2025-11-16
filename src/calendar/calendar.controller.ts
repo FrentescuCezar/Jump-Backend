@@ -36,6 +36,28 @@ export class CalendarController {
     }
   }
 
+  @Get("events/upcoming")
+  async listUpcomingEvents(
+    @CurrentDbUser() user: User,
+  ): Promise<CalendarEventsPayloadDto> {
+    const events = await this.calendarService.listUpcomingEvents(user.id)
+    return {
+      events: events.map((event) => this.toCalendarEventDto(event)),
+      serverTimestamp: new Date().toISOString(),
+    }
+  }
+
+  @Get("events/past")
+  async listPastEvents(
+    @CurrentDbUser() user: User,
+  ): Promise<CalendarEventsPayloadDto> {
+    const events = await this.calendarService.listPastEvents(user.id)
+    return {
+      events: events.map((event) => this.toCalendarEventDto(event)),
+      serverTimestamp: new Date().toISOString(),
+    }
+  }
+
   @Get("events/delta-sync")
   async deltaSync(
     @Query() query: CalendarEventsDeltaQueryDto,
