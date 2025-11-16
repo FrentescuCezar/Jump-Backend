@@ -69,4 +69,3 @@ export class CreatePlannerEntryDto {
   @MaxLength(240)
   description!: string
 }
-

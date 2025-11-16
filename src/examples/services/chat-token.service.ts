@@ -28,6 +28,6 @@ export class ChatTokenService {
     if (typeof payload === "string") {
       throw new Error("Invalid chat token payload")
     }
-    return payload as JwtPayload
+    return payload
   }
 }

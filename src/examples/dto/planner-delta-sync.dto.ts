@@ -39,4 +39,3 @@ export class PlannerDeltaSyncDto {
   @IsOptional()
   end?: string
 }
-

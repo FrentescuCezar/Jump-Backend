@@ -26,7 +26,3 @@ export interface PulseResponse {
   spotlight: PulseSpotlight[]
   experiments: PulseExperiment[]
 }
-
-
-
-

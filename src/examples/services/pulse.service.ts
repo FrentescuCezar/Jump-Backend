@@ -130,7 +130,3 @@ export class PulseService {
     return streak
   }
 }
-
-
-
-

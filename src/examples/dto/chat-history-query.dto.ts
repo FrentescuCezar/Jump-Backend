@@ -22,4 +22,3 @@ export class ChatHistoryQueryDto {
   @Min(5)
   limit?: number
 }
-
