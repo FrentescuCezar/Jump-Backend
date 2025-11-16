@@ -57,3 +57,11 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
+
+dist
+node_modules
+prisma/*.d.ts
+prisma/*.js
+prisma/*.js.map
+tsconfig.build.tsbuildinfo
+generated
