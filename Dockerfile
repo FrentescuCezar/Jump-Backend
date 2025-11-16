@@ -29,7 +29,7 @@ COPY . .
 # Build backend -> must emit to ./dist
 RUN npm run build
 # Fail fast if build didn't emit the expected entry
-RUN test -f dist/main.js
+RUN test -f dist/src/main.js
 
 FROM base AS runner
 ENV NODE_ENV=production
