@@ -4,5 +4,3 @@ export class ToggleNotetakerDto {
   @IsBoolean()
   enabled!: boolean
 }
-
-

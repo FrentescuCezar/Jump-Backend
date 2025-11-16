@@ -1,7 +1,17 @@
-import { Body, Controller, Get, Param, Patch, Query } from "@nestjs/common"
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  HttpCode,
+} from "@nestjs/common"
 import { ApiTags } from "@nestjs/swagger"
 import { CalendarService } from "./calendar.service"
 import { RecallService } from "../recall/recall.service"
+import { CalendarSyncService } from "./calendar-sync.service"
 import { CalendarEventDto } from "./dto/calendar-event.dto"
 import { ToggleNotetakerDto } from "./dto/toggle-notetaker.dto"
 import { CurrentDbUser } from "../users/decorators/current-db-user.decorator"
@@ -11,6 +21,8 @@ import type {
   RecallBot,
   User,
 } from "@prisma/client"
+import { ConnectedProvider } from "@prisma/client"
+import { PrismaService } from "../../prisma/prisma.service"
 import {
   CalendarEventsDeltaQueryDto,
   CalendarEventsDeltaResponseDto,
@@ -23,6 +35,8 @@ export class CalendarController {
   constructor(
     private readonly calendarService: CalendarService,
     private readonly recallService: RecallService,
+    private readonly calendarSyncService: CalendarSyncService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Get("events")
@@ -30,7 +44,7 @@ export class CalendarController {
     @CurrentDbUser() user: User,
   ): Promise<CalendarEventsPayloadDto> {
     const events = await this.calendarService.listUpcomingEvents(user.id)
-    return this.buildEventsPayload(events)
+    return this.buildEventsPayload(user.id, events)
   }
 
   @Get("events/upcoming")
@@ -38,7 +52,7 @@ export class CalendarController {
     @CurrentDbUser() user: User,
   ): Promise<CalendarEventsPayloadDto> {
     const events = await this.calendarService.listUpcomingEvents(user.id)
-    return this.buildEventsPayload(events)
+    return this.buildEventsPayload(user.id, events)
   }
 
   @Get("events/past")
@@ -46,7 +60,7 @@ export class CalendarController {
     @CurrentDbUser() user: User,
   ): Promise<CalendarEventsPayloadDto> {
     const events = await this.calendarService.listPastEvents(user.id)
-    return this.buildEventsPayload(events)
+    return this.buildEventsPayload(user.id, events)
   }
 
   @Get("events/delta-sync")
@@ -55,15 +69,59 @@ export class CalendarController {
     @CurrentDbUser() user: User,
   ): Promise<CalendarEventsDeltaResponseDto> {
     const updatedSince = new Date(query.updatedSince)
-    const events = await this.calendarService.listUpdatedEvents(
+    const { events, deletedIds } = await this.calendarService.listUpdatedEvents(
       user.id,
       updatedSince,
+    )
+    const providerSyncedAt = await this.calendarService.getLatestProviderSyncAt(
+      user.id,
     )
 
     return {
       events: events.map((event) => this.toCalendarEventDto(event)),
-      deletedIds: [],
+      deletedIds,
       serverTimestamp: new Date().toISOString(),
+      providerSyncedAt: providerSyncedAt
+        ? providerSyncedAt.toISOString()
+        : null,
+    }
+  }
+
+  @Post("sync-now")
+  @HttpCode(202)
+  async syncNow(@CurrentDbUser() user: User) {
+    return this.calendarSyncService.syncUserAccounts(user.id)
+  }
+
+  @Get("webhook-status")
+  async getWebhookStatus(@CurrentDbUser() user: User) {
+    const accounts = await this.prisma.connectedAccount.findMany({
+      where: {
+        userId: user.id,
+        provider: ConnectedProvider.GOOGLE_CALENDAR,
+      },
+      select: {
+        id: true,
+        label: true,
+        providerAccountId: true,
+        calendarChannelId: true,
+        calendarResourceId: true,
+        calendarChannelExpiresAt: true,
+        lastSyncedAt: true,
+      },
+    })
+
+    return {
+      accounts: accounts.map((account) => ({
+        id: account.id,
+        label: account.label,
+        email: account.providerAccountId,
+        hasWebhook: !!account.calendarChannelId,
+        channelId: account.calendarChannelId,
+        resourceId: account.calendarResourceId,
+        expiresAt: account.calendarChannelExpiresAt?.toISOString() ?? null,
+        lastSyncedAt: account.lastSyncedAt?.toISOString() ?? null,
+      })),
     }
   }
 
@@ -118,17 +176,23 @@ export class CalendarController {
     }
   }
 
-  private buildEventsPayload(
+  private async buildEventsPayload(
+    userId: string,
     events: Array<
       CalendarEvent & {
         recallBot: RecallBot | null
         connectedAccount: ConnectedAccount
       }
     >,
-  ): CalendarEventsPayloadDto {
+  ): Promise<CalendarEventsPayloadDto> {
+    const providerSyncedAt =
+      await this.calendarService.getLatestProviderSyncAt(userId)
     return {
       events: events.map((event) => this.toCalendarEventDto(event)),
       serverTimestamp: new Date().toISOString(),
+      providerSyncedAt: providerSyncedAt
+        ? providerSyncedAt.toISOString()
+        : null,
     }
   }
 }

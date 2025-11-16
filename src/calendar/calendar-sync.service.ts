@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common"
-import { Cron, CronExpression } from "@nestjs/schedule"
+import { Interval } from "@nestjs/schedule"
 import {
   CalendarEventStatus,
   ConnectedAccount,
@@ -7,15 +7,27 @@ import {
   MeetingPlatform,
 } from "@prisma/client"
 import { google, type calendar_v3 } from "googleapis"
-import { addDays } from "date-fns"
+import { addDays, startOfMonth } from "date-fns"
 import { PrismaService } from "../../prisma/prisma.service"
 import { CalendarService, UpsertCalendarEventInput } from "./calendar.service"
 import { RecallService } from "../recall/recall.service"
 import { GoogleOAuthService } from "../integrations/google/google-oauth.service"
+import {
+  CALENDAR_GOOGLE_SYNC_INTERVAL_MS,
+  CALENDAR_SYNC_LOOKBACK_MS,
+  CALENDAR_SYNC_MAX_SCHEDULED_BATCH,
+} from "./calendar.constants"
+import type {
+  AccountSyncResult,
+  CalendarSyncSummary,
+  SyncTriggerSource,
+} from "./types/calendar-sync.types"
 
 @Injectable()
 export class CalendarSyncService {
   private readonly logger = new Logger(CalendarSyncService.name)
+  private readonly activeAccountLocks = new Set<string>()
+  private schedulerInFlight = false
 
   constructor(
     private readonly prisma: PrismaService,
@@ -24,21 +36,94 @@ export class CalendarSyncService {
     private readonly googleOAuth: GoogleOAuthService,
   ) {}
 
-  @Cron(CronExpression.EVERY_10_MINUTES)
-  async syncAllAccounts() {
-    const googleAccounts = await this.prisma.connectedAccount.findMany({
-      where: { provider: ConnectedProvider.GOOGLE_CALENDAR },
+  @Interval(CALENDAR_GOOGLE_SYNC_INTERVAL_MS)
+  async syncDueAccounts() {
+    if (this.schedulerInFlight) {
+      return
+    }
+    this.schedulerInFlight = true
+    try {
+      const dueBefore = new Date(Date.now() - CALENDAR_SYNC_LOOKBACK_MS)
+      const accounts = await this.prisma.connectedAccount.findMany({
+        where: {
+          provider: ConnectedProvider.GOOGLE_CALENDAR,
+          OR: [
+            { lastSyncedAt: null },
+            {
+              lastSyncedAt: {
+                lt: dueBefore,
+              },
+            },
+          ],
+        },
+        orderBy: { lastSyncedAt: "asc" },
+        take: CALENDAR_SYNC_MAX_SCHEDULED_BATCH,
+      })
+
+      await Promise.allSettled(
+        accounts.map((account) =>
+          this.syncAccountWithLock(account, "scheduler"),
+        ),
+      )
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "unknown")
+      this.logger.error(`Scheduled calendar sync failed: ${message}`)
+    } finally {
+      this.schedulerInFlight = false
+    }
+  }
+
+  async syncUserAccounts(userId: string): Promise<CalendarSyncSummary> {
+    const accounts = await this.prisma.connectedAccount.findMany({
+      where: {
+        userId,
+        provider: ConnectedProvider.GOOGLE_CALENDAR,
+      },
+      orderBy: { createdAt: "asc" },
     })
 
-    for (const account of googleAccounts) {
-      try {
-        await this.syncGoogleAccount(account)
-      } catch (error) {
+    const summary: CalendarSyncSummary = {
+      success: true,
+      totalAccounts: accounts.length,
+      syncedAccounts: 0,
+      skippedAccounts: 0,
+      failedAccounts: [],
+    }
+
+    const results = await Promise.allSettled(
+      accounts.map((account) => this.syncAccountWithLock(account, "manual")),
+    )
+
+    for (const outcome of results) {
+      if (outcome.status === "fulfilled") {
+        const result = outcome.value
+        if (result.status === "synced") {
+          summary.syncedAccounts += 1
+        } else if (result.status === "skipped") {
+          summary.skippedAccounts += 1
+        } else if (result.status === "error") {
+          summary.failedAccounts.push({
+            accountId: result.accountId,
+            message: result.message ?? "Unknown sync failure",
+          })
+        }
+      } else {
         this.logger.error(
-          `Failed to sync account ${account.id} (${account.label ?? account.providerAccountId}): ${error}`,
+          `[manual] Calendar sync promise rejected: ${outcome.reason}`,
         )
+        summary.failedAccounts.push({
+          accountId: "unknown",
+          message:
+            outcome.reason instanceof Error
+              ? outcome.reason.message
+              : String(outcome.reason ?? "Unknown sync failure"),
+        })
       }
     }
+
+    summary.success = summary.failedAccounts.length === 0
+    return summary
   }
 
   async syncAccountById(accountId: string) {
@@ -48,7 +133,42 @@ export class CalendarSyncService {
     if (!account || account.provider !== ConnectedProvider.GOOGLE_CALENDAR) {
       return
     }
-    await this.syncGoogleAccount(account)
+    await this.syncAccountWithLock(account, "oauth")
+  }
+
+  private async syncAccountWithLock(
+    account: ConnectedAccount,
+    source: SyncTriggerSource,
+  ): Promise<AccountSyncResult> {
+    if (this.activeAccountLocks.has(account.id)) {
+      this.logger.verbose(
+        `[${source}] Skip account ${account.id} — sync in progress`,
+      )
+      return { accountId: account.id, status: "skipped" }
+    }
+
+    if (account.provider !== ConnectedProvider.GOOGLE_CALENDAR) {
+      return {
+        accountId: account.id,
+        status: "skipped",
+        message: "Unsupported provider",
+      }
+    }
+
+    this.activeAccountLocks.add(account.id)
+    try {
+      await this.syncGoogleAccount(account)
+      return { accountId: account.id, status: "synced" }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to sync account"
+      this.logger.error(
+        `[${source}] Failed to sync account ${account.id} (${account.label ?? account.providerAccountId}): ${message}`,
+      )
+      return { accountId: account.id, status: "error", message }
+    } finally {
+      this.activeAccountLocks.delete(account.id)
+    }
   }
 
   private async syncGoogleAccount(account: ConnectedAccount) {
@@ -110,8 +230,9 @@ export class CalendarSyncService {
   private async fetchCalendarWindow(
     calendar: calendar_v3.Calendar,
   ): Promise<calendar_v3.Schema$Event[]> {
-    const timeMin = new Date()
-    const timeMax = addDays(timeMin, 28)
+    const now = new Date()
+    const timeMin = startOfMonth(now)
+    const timeMax = addDays(now, 28)
     let pageToken: string | undefined
     const allEvents: calendar_v3.Schema$Event[] = []
 
