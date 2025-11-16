@@ -101,9 +101,7 @@ export class AiContentService {
       return
     }
 
-    const transcriptPayload = await this.fetchTranscriptPayload(
-      transcriptMedia,
-    )
+    const transcriptPayload = await this.fetchTranscriptPayload(transcriptMedia)
     const transcriptText = this.formatTranscript(transcriptPayload)
 
     const insightResult = await this.generateInsightContent(
@@ -218,7 +216,7 @@ export class AiContentService {
       return null
     }
     const collected = words
-      .map((word) => (word as any)?.text)
+      .map((word) => word?.text)
       .filter((value): value is string => typeof value === "string")
     if (!collected.length) {
       return null
@@ -233,9 +231,7 @@ export class AiContentService {
     const attendees = this.extractAttendeeNames(meeting)
     const agenda =
       meeting.description ??
-      (Array.isArray(meeting.recurrence)
-        ? meeting.recurrence.join(", ")
-        : null)
+      (Array.isArray(meeting.recurrence) ? meeting.recurrence.join(", ") : null)
 
     if (!this.openAi) {
       return this.buildFallbackInsight(meeting, transcript)
@@ -250,7 +246,7 @@ export class AiContentService {
           {
             role: "system",
             content:
-              "You create factual meeting summaries grounded in the provided transcript. Respond with JSON: {\"summary\":\"...\",\"followUpEmail\":\"...\"}.",
+              'You create factual meeting summaries grounded in the provided transcript. Respond with JSON: {"summary":"...","followUpEmail":"..."}.',
           },
           {
             role: "user",
@@ -454,18 +450,26 @@ export class AiContentService {
     meeting: MeetingContext,
     transcript: string,
   ) {
-    const summary = transcript.substring(0, 280)
-    const replacements: Record<string, string> = {
-      title: meeting.title ?? "our recent meeting",
-      date: meeting.startTime.toDateString(),
-      summary,
-      advisor: meeting.user.name ?? "Our team",
-    }
+    const advisor = meeting.user.name ?? "Our team"
+    const meetingTitle = meeting.title ?? "our recent meeting"
+    const meetingDate = meeting.startTime.toDateString()
+    const highlight = this.extractTranscriptHighlight(transcript)
+    const sanitizedInstruction = template
+      ? template.replace(/#\w+/g, "").trim()
+      : ""
+    const hashtags = this.extractTemplateHashtags(template)
 
-    return template.replace(
-      /{{\s*([^}]+)\s*}}/g,
-      (match, key: string) => replacements[key.trim()] ?? match,
-    )
+    const segments = [
+      `${advisor} met for "${meetingTitle}" on ${meetingDate} to align on client goals.`,
+      highlight ? `Key takeaway: ${highlight}` : null,
+      sanitizedInstruction
+        ? `Focus: ${sanitizedInstruction.substring(0, 200)}`
+        : null,
+      hashtags.length ? hashtags.join(" ") : null,
+    ].filter((segment): segment is string => Boolean(segment))
+
+    const drafted = segments.join("\n\n")
+    return this.trimToWordLimit(drafted)
   }
 
   private extractAttendeeNames(meeting: MeetingContext): string[] {
@@ -480,5 +484,34 @@ export class AiContentService {
       .map((attendee) => attendee.displayName ?? attendee.email ?? "")
       .filter((name): name is string => !!name)
   }
-}
 
+  private trimToWordLimit(text: string) {
+    const words = text.trim().split(/\s+/)
+    if (words.length <= this.socialWordLimit) {
+      return text.trim()
+    }
+    return `${words.slice(0, this.socialWordLimit).join(" ")}…`
+  }
+
+  private extractTranscriptHighlight(transcript: string) {
+    if (!transcript.trim()) {
+      return ""
+    }
+    const flattened = transcript.replace(/\s+/g, " ").trim()
+    const sentences = flattened
+      .split(/(?<=[.!?])\s+/)
+      .filter((sentence) => sentence.length > 0)
+    if (sentences.length === 0) {
+      return flattened.substring(0, 200)
+    }
+    return sentences.slice(0, 2).join(" ").substring(0, 400)
+  }
+
+  private extractTemplateHashtags(template: string) {
+    if (!template) {
+      return []
+    }
+    const matches = template.match(/#[\p{L}\p{N}_]+/giu) ?? []
+    return Array.from(new Set(matches)).slice(0, 5)
+  }
+}

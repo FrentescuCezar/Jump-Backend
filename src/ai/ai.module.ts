@@ -8,6 +8,3 @@ import { AiContentService } from "./ai-content.service"
   exports: [AiContentService],
 })
 export class AiModule {}
-
-
-
