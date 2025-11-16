@@ -10,7 +10,8 @@ describe("FacebookOAuthController", () => {
   const mockFacebookOAuth = {
     buildAuthorizationUrl: jest.fn(),
     handleCallback: jest.fn(),
-    settingsRedirectBase: "http://localhost:3000/settings/integrations?provider=facebook",
+    settingsRedirectBase:
+      "http://localhost:3000/settings/integrations?provider=facebook",
   }
 
   const mockUser = {
@@ -40,7 +41,9 @@ describe("FacebookOAuthController", () => {
   describe("getUrl", () => {
     it("should return authorization URL", async () => {
       const url = "https://www.facebook.com/v19.0/dialog/oauth?state=test"
-      ;(mockFacebookOAuth.buildAuthorizationUrl as jest.Mock).mockReturnValue(url)
+      ;(mockFacebookOAuth.buildAuthorizationUrl as jest.Mock).mockReturnValue(
+        url,
+      )
 
       const result = await controller.getUrl(mockUser as any, undefined)
 
@@ -53,7 +56,9 @@ describe("FacebookOAuthController", () => {
 
     it("should include redirect path in URL", async () => {
       const url = "https://www.facebook.com/v19.0/dialog/oauth?state=test"
-      ;(mockFacebookOAuth.buildAuthorizationUrl as jest.Mock).mockReturnValue(url)
+      ;(mockFacebookOAuth.buildAuthorizationUrl as jest.Mock).mockReturnValue(
+        url,
+      )
 
       const result = await controller.getUrl(mockUser as any, "/settings")
 
@@ -192,4 +197,3 @@ describe("FacebookOAuthController", () => {
     })
   })
 })
-
