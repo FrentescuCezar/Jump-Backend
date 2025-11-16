@@ -108,7 +108,9 @@
     "transformIgnorePatterns": [
       "node_modules/(?!(p-queue|p-timeout|eventemitter3)/)"
     ],
-    "extensionsToTreatAsEsm": [".ts"],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/$1"
     }
