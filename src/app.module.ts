@@ -20,6 +20,7 @@ import { RecallModule } from "./recall/recall.module"
 import { MeetingsModule } from "./meetings/meetings.module"
 import { AutomationsModule } from "./automations/automations.module"
 import { SocialModule } from "./social/social.module"
+import { OnboardingModule } from "./onboarding/onboarding.module"
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { SocialModule } from "./social/social.module"
     MeetingsModule,
     AutomationsModule,
     SocialModule,
+    OnboardingModule,
     KeycloakConnectModule.registerAsync({
       useFactory: (configService: ConfigService) => {
         return {
