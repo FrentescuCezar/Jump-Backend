@@ -36,12 +36,16 @@ describe("AppService", () => {
 
   describe("testConnection", () => {
     it("should return connected true when database is accessible", async () => {
-      ;(mockPrisma.$queryRaw as jest.Mock).mockResolvedValue([{ "?column?": 1 }])
+      ;(mockPrisma.$queryRaw as jest.Mock).mockResolvedValue([
+        { "?column?": 1 },
+      ])
 
       const result = await service.testConnection()
 
       expect(result.connected).toBe(true)
-      expect(result.message).toBe("Successfully connected to Supabase via Prisma")
+      expect(result.message).toBe(
+        "Successfully connected to Supabase via Prisma",
+      )
     })
 
     it("should return connected false when database connection fails", async () => {
@@ -64,4 +68,3 @@ describe("AppService", () => {
     })
   })
 })
-
