@@ -28,6 +28,3 @@ export class UpdateAutomationDto {
   @IsObject()
   config?: Record<string, unknown>
 }
-
-
-

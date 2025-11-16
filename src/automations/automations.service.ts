@@ -18,45 +18,78 @@ export class AutomationsService {
   }
 
   create(userId: string, dto: CreateAutomationDto) {
-    return this.prisma.automation.create({
-      data: {
-        userId,
-        name: dto.name,
-        channel: dto.channel ?? SocialChannel.LINKEDIN,
-        promptTemplate: dto.promptTemplate,
-        isEnabled: dto.isEnabled ?? true,
-        config: dto.config
-          ? (dto.config as Prisma.InputJsonValue)
-          : Prisma.JsonNull,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const channel = dto.channel ?? SocialChannel.LINKEDIN
+      const isEnabled = dto.isEnabled ?? true
+
+      if (isEnabled) {
+        await tx.automation.updateMany({
+          where: {
+            userId,
+            channel,
+          },
+          data: { isEnabled: false },
+        })
+      }
+
+      return tx.automation.create({
+        data: {
+          userId,
+          name: dto.name,
+          channel,
+          promptTemplate: dto.promptTemplate,
+          isEnabled,
+          config: dto.config
+            ? (dto.config as Prisma.InputJsonValue)
+            : Prisma.JsonNull,
+        },
+      })
     })
   }
 
   async update(id: string, userId: string, dto: UpdateAutomationDto) {
-    const automation = await this.prisma.automation.findUnique({
-      where: { id },
-    })
-    if (!automation || automation.userId !== userId) {
-      throw new AppError(ErrorCodes.NOT_FOUND, {
-        params: { resource: "Automation" },
+    return this.prisma.$transaction(async (tx) => {
+      const automation = await tx.automation.findUnique({
+        where: { id },
       })
-    }
+      if (!automation || automation.userId !== userId) {
+        throw new AppError(ErrorCodes.NOT_FOUND, {
+          params: { resource: "Automation" },
+        })
+      }
 
-    const data: Prisma.AutomationUpdateInput = {
-      name: dto.name ?? automation.name,
-      channel: dto.channel ?? automation.channel,
-      promptTemplate: dto.promptTemplate ?? automation.promptTemplate,
-      isEnabled:
-        dto.isEnabled !== undefined ? dto.isEnabled : automation.isEnabled,
-    }
+      const nextChannel = dto.channel ?? automation.channel
+      const nextIsEnabled =
+        dto.isEnabled !== undefined ? dto.isEnabled : automation.isEnabled
 
-    if (dto.config !== undefined) {
-      data.config = (dto.config as Prisma.InputJsonValue) ?? Prisma.JsonNull
-    }
+      const data: Prisma.AutomationUpdateInput = {
+        name: dto.name ?? automation.name,
+        channel: nextChannel,
+        promptTemplate: dto.promptTemplate ?? automation.promptTemplate,
+        isEnabled: nextIsEnabled,
+      }
 
-    return this.prisma.automation.update({
-      where: { id },
-      data,
+      if (dto.config !== undefined) {
+        data.config = (dto.config as Prisma.InputJsonValue) ?? Prisma.JsonNull
+      }
+
+      const updated = await tx.automation.update({
+        where: { id },
+        data,
+      })
+
+      if (nextIsEnabled) {
+        await tx.automation.updateMany({
+          where: {
+            userId,
+            channel: nextChannel,
+            NOT: { id: updated.id },
+          },
+          data: { isEnabled: false },
+        })
+      }
+
+      return updated
     })
   }
 }

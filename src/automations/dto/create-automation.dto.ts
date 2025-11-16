@@ -25,5 +25,3 @@ export class CreateAutomationDto {
   @IsObject()
   config?: Record<string, unknown>
 }
-
-

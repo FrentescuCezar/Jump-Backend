@@ -17,10 +17,7 @@ export class AutomationsController {
   }
 
   @Post()
-  create(
-    @CurrentDbUser() user: User,
-    @Body() body: CreateAutomationDto,
-  ) {
+  create(@CurrentDbUser() user: User, @Body() body: CreateAutomationDto) {
     return this.automationsService.create(user.id, body)
   }
 
@@ -33,6 +30,3 @@ export class AutomationsController {
     return this.automationsService.update(id, user.id, body)
   }
 }
-
-
-
