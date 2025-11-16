@@ -1,7 +1,8 @@
-import { IsInt, Max, Min } from "class-validator"
+import { IsBoolean, IsInt, Max, Min, IsOptional } from "class-validator"
 
 export class MeetingPreferenceDto {
   leadMinutes!: number
+  defaultNotetaker!: boolean
 }
 
 export class UpdateMeetingPreferenceDto {
@@ -9,5 +10,8 @@ export class UpdateMeetingPreferenceDto {
   @Min(1)
   @Max(60)
   leadMinutes!: number
-}
 
+  @IsOptional()
+  @IsBoolean()
+  defaultNotetaker?: boolean
+}

@@ -8,17 +8,21 @@ import {
   MeetingMediaStatus,
   MeetingMediaType,
   MeetingPreference,
+  MeetingShare,
   RecallBot,
   SocialPost,
+  User,
 } from "@prisma/client"
 import { PrismaService } from "../../prisma/prisma.service"
 import { RecallService } from "../recall/recall.service"
 import { AiContentService } from "../ai/ai-content.service"
 import { CalendarEventDto } from "../calendar/dto/calendar-event.dto"
 import {
+  MeetingActivityDto,
   MeetingDetailsDto,
   MeetingInsightDto,
   MeetingMediaDto,
+  MeetingViewerRole,
   RecallBotDto,
   SocialPostDto,
 } from "./dto/meeting-details.dto"
@@ -28,12 +32,18 @@ import {
 } from "./dto/meeting-preference.dto"
 import { AppError } from "../errors/app-error"
 import { ErrorCodes } from "../errors/error-codes"
+import { MeetingShareDto } from "./dto/meeting-share.dto"
 
 type MeetingEvent = CalendarEvent & {
   connectedAccount: ConnectedAccount
   recallBot: (RecallBot & { media: MeetingMedia[] }) | null
   meetingInsights: MeetingInsight[]
   socialPosts: SocialPost[]
+}
+
+type MeetingDetailsAccessOptions = {
+  allowShared?: boolean
+  viewerEmail?: string
 }
 
 @Injectable()
@@ -47,46 +57,49 @@ export class MeetingsService {
   async getMeetingDetails(
     meetingId: string,
     userId: string,
+    opts?: MeetingDetailsAccessOptions,
   ): Promise<MeetingDetailsDto> {
-    const event = await this.prisma.calendarEvent.findUnique({
-      where: { id: meetingId },
-      include: {
-        connectedAccount: true,
-        recallBot: {
-          include: {
-            media: true,
-          },
-        },
-        meetingInsights: {
-          orderBy: { createdAt: "desc" },
-          take: 1,
-        },
-        socialPosts: {
-          orderBy: { createdAt: "desc" },
-        },
-      },
-    })
+    const meeting = await this.findMeetingEvent(meetingId)
 
-    if (!event || event.userId !== userId) {
+    if (!meeting) {
       throw new AppError(ErrorCodes.NOT_FOUND, {
         params: { resource: "Meeting" },
       })
     }
 
-    const meeting = event as MeetingEvent
-    const [latestInsight] = meeting.meetingInsights
-    const media = meeting.recallBot?.media ?? []
+    await this.resolveViewerRole(meeting, userId, opts)
+
+    return this.toMeetingDetailsDto(meeting)
+  }
+
+  async getMeetingActivity(
+    meetingId: string,
+    viewer: User,
+  ): Promise<MeetingActivityDto> {
+    const meeting = await this.findMeetingEvent(meetingId)
+
+    if (!meeting) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "Meeting" },
+      })
+    }
+
+    const viewerRole = await this.resolveViewerRole(meeting, viewer.id, {
+      allowShared: true,
+      viewerEmail: viewer.email,
+    })
+
+    const shareCount =
+      viewerRole === "owner"
+        ? await this.prisma.meetingShare.count({
+            where: { calendarEventId: meetingId },
+          })
+        : undefined
 
     return {
-      event: this.toCalendarEventDto(meeting),
-      recallBot: meeting.recallBot
-        ? this.toRecallBotDto(meeting.recallBot)
-        : null,
-      media: media.map((item) => this.toMeetingMediaDto(item)),
-      insight: latestInsight ? this.toMeetingInsightDto(latestInsight) : null,
-      socialPosts: meeting.socialPosts.map((post) =>
-        this.toSocialPostDto(post),
-      ),
+      viewerRole,
+      details: this.toMeetingDetailsDto(meeting),
+      ...(shareCount !== undefined ? { shareCount } : {}),
     }
   }
 
@@ -101,11 +114,84 @@ export class MeetingsService {
     })
   }
 
+  async getVideoPlaybackUrl(meetingId: string, userId: string) {
+    const event = await this.prisma.calendarEvent.findUnique({
+      where: { id: meetingId },
+      include: {
+        recallBot: true,
+      },
+    })
+
+    if (!event || event.userId !== userId) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "Meeting" },
+      })
+    }
+
+    if (!event.recallBot) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "MeetingVideo" },
+      })
+    }
+
+    const media = await this.recallService.refreshVideoMedia(event.recallBot.id)
+    if (!media?.downloadUrl) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "MeetingVideo" },
+      })
+    }
+
+    return {
+      downloadUrl: media.downloadUrl,
+      expiresAt: media.expiresAt ? media.expiresAt.toISOString() : null,
+    }
+  }
+
   async regenerateAiContent(meetingId: string, userId: string) {
     await this.ensureOwnership(meetingId, userId)
     await this.aiContent.generateMeetingContent(meetingId, {
       regenerate: true,
     })
+  }
+
+  async addMeetingShare(
+    meetingId: string,
+    ownerId: string,
+    email: string,
+  ): Promise<MeetingShareDto> {
+    await this.ensureOwnership(meetingId, ownerId)
+    const normalizedEmail = this.normalizeEmail(email)
+
+    const share = await this.prisma.meetingShare.upsert({
+      where: {
+        calendarEventId_email: {
+          calendarEventId: meetingId,
+          email: normalizedEmail,
+        },
+      },
+      update: {
+        invitedByUserId: ownerId,
+      },
+      create: {
+        calendarEventId: meetingId,
+        email: normalizedEmail,
+        invitedByUserId: ownerId,
+      },
+    })
+
+    return this.toMeetingShareDto(share)
+  }
+
+  async listMeetingShares(
+    meetingId: string,
+    ownerId: string,
+  ): Promise<MeetingShareDto[]> {
+    await this.ensureOwnership(meetingId, ownerId)
+    const shares = await this.prisma.meetingShare.findMany({
+      where: { calendarEventId: meetingId },
+      orderBy: { createdAt: "desc" },
+    })
+    return shares.map((share) => this.toMeetingShareDto(share))
   }
 
   async getMeetingPreference(userId: string): Promise<MeetingPreferenceDto> {
@@ -122,9 +208,14 @@ export class MeetingsService {
       create: {
         userId,
         leadMinutes: dto.leadMinutes,
+        defaultNotetaker:
+          dto.defaultNotetaker !== undefined ? dto.defaultNotetaker : true,
       },
       update: {
         leadMinutes: dto.leadMinutes,
+        ...(dto.defaultNotetaker !== undefined && {
+          defaultNotetaker: dto.defaultNotetaker,
+        }),
       },
     })
 
@@ -170,6 +261,85 @@ export class MeetingsService {
       throw new AppError(ErrorCodes.NOT_FOUND, {
         params: { resource: "Meeting" },
       })
+    }
+  }
+
+  private async findMeetingEvent(
+    meetingId: string,
+  ): Promise<MeetingEvent | null> {
+    const event = await this.prisma.calendarEvent.findUnique({
+      where: { id: meetingId },
+      include: {
+        connectedAccount: true,
+        recallBot: {
+          include: {
+            media: true,
+          },
+        },
+        meetingInsights: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
+        socialPosts: {
+          orderBy: { createdAt: "desc" },
+        },
+      },
+    })
+
+    return event ? (event as MeetingEvent) : null
+  }
+
+  private async resolveViewerRole(
+    meeting: MeetingEvent,
+    userId: string,
+    opts?: MeetingDetailsAccessOptions,
+  ): Promise<MeetingViewerRole> {
+    if (meeting.userId === userId) {
+      return "owner"
+    }
+
+    if (!opts?.allowShared || !opts.viewerEmail) {
+      throw new AppError(ErrorCodes.NOT_FOUND, {
+        params: { resource: "Meeting" },
+      })
+    }
+
+    const hasAccess = await this.hasSharedAccess(meeting.id, opts.viewerEmail)
+
+    if (!hasAccess) {
+      throw new AppError(ErrorCodes.FORBIDDEN, {
+        params: { resource: "Meeting" },
+      })
+    }
+
+    return "guest"
+  }
+
+  private async hasSharedAccess(meetingId: string, email: string) {
+    const normalizedEmail = this.normalizeEmail(email)
+    const share = await this.prisma.meetingShare.findFirst({
+      where: {
+        calendarEventId: meetingId,
+        email: normalizedEmail,
+      },
+    })
+    return Boolean(share)
+  }
+
+  private toMeetingDetailsDto(meeting: MeetingEvent): MeetingDetailsDto {
+    const [latestInsight] = meeting.meetingInsights
+    const media = meeting.recallBot?.media ?? []
+
+    return {
+      event: this.toCalendarEventDto(meeting),
+      recallBot: meeting.recallBot
+        ? this.toRecallBotDto(meeting.recallBot)
+        : null,
+      media: media.map((item) => this.toMeetingMediaDto(item)),
+      insight: latestInsight ? this.toMeetingInsightDto(latestInsight) : null,
+      socialPosts: meeting.socialPosts.map((post) =>
+        this.toSocialPostDto(post),
+      ),
     }
   }
 
@@ -241,6 +411,9 @@ export class MeetingsService {
       automationId: post.automationId,
       publishedAt: post.publishedAt ? post.publishedAt.toISOString() : null,
       error: post.error,
+      externalUrl:
+        (post as SocialPost & { externalUrl?: string | null }).externalUrl ??
+        null,
     }
   }
 
@@ -261,6 +434,20 @@ export class MeetingsService {
   ): MeetingPreferenceDto {
     return {
       leadMinutes: preference.leadMinutes,
+      defaultNotetaker: preference.defaultNotetaker,
     }
+  }
+
+  private toMeetingShareDto(share: MeetingShare): MeetingShareDto {
+    return {
+      id: share.id,
+      email: share.email,
+      invitedByUserId: share.invitedByUserId,
+      createdAt: share.createdAt.toISOString(),
+    }
+  }
+
+  private normalizeEmail(email: string) {
+    return email.trim().toLowerCase()
   }
 }

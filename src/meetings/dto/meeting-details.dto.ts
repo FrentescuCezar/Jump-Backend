@@ -40,6 +40,7 @@ export class SocialPostDto {
   automationId?: string | null
   publishedAt?: string | null
   error?: string | null
+  externalUrl?: string | null
 }
 
 export class MeetingDetailsDto {
@@ -50,5 +51,10 @@ export class MeetingDetailsDto {
   socialPosts: SocialPostDto[]
 }
 
+export type MeetingViewerRole = "owner" | "guest"
 
-
+export class MeetingActivityDto {
+  viewerRole: MeetingViewerRole
+  details: MeetingDetailsDto
+  shareCount?: number
+}
