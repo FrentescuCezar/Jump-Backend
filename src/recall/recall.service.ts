@@ -12,7 +12,7 @@ import {
   RecallBotStatus,
   RecallBot,
 } from "@prisma/client"
-import { AxiosRequestConfig } from "axios"
+import { AxiosRequestConfig, isAxiosError } from "axios"
 import type { Response } from "express"
 import { AiContentService } from "../ai/ai-content.service"
 import { AppError } from "../errors/app-error"
@@ -59,7 +59,16 @@ export class RecallService {
     })
 
     if (existingBot) {
-      return existingBot
+      if (!this.shouldResetBot(existingBot.status)) {
+        return existingBot
+      }
+
+      this.logger.debug(
+        `Found Recall bot ${existingBot.id} with status ${existingBot.status} for event ${event.id}; scheduling a replacement`,
+      )
+      await this.prisma.recallBot.delete({
+        where: { id: existingBot.id },
+      })
     }
 
     const preference = await this.prisma.meetingPreference.findUnique({
@@ -102,6 +111,7 @@ export class RecallService {
           },
         },
         video_mixed_mp4: {},
+        video_mixed_layout: "gallery_view_v2",
       },
     }
 
@@ -141,12 +151,28 @@ export class RecallService {
       return
     }
 
+    if (
+      bot.status === RecallBotStatus.DONE ||
+      bot.status === RecallBotStatus.CANCELLED
+    ) {
+      this.logger.debug(
+        `Skipping cancel for Recall bot ${bot.id}: already ${bot.status}`,
+      )
+      return
+    }
+
     try {
       await this.http.axiosRef.delete(`${this.apiBaseUrl}/bot/${bot.id}`, {
         headers: this.authHeaders,
       })
     } catch (error) {
-      this.logger.warn(`Failed to cancel Recall bot ${bot.id}: ${error}`)
+      if (this.isRecallBotNotFound(error)) {
+        this.logger.debug(
+          `Recall bot ${bot.id} not found during cancel; treating as already removed`,
+        )
+      } else {
+        this.logger.warn(`Failed to cancel Recall bot ${bot.id}: ${error}`)
+      }
     }
 
     await this.prisma.recallBot.update({
@@ -155,7 +181,7 @@ export class RecallService {
     })
   }
 
-  async pollBotStatus(bot: RecallBot) {
+  async pollBotStatus(bot: RecallBotWithEvent) {
     let response: { data: RecallBotApiResponse }
     try {
       response = await this.http.axiosRef.get(
@@ -181,9 +207,11 @@ export class RecallService {
 
     const statusChanged = bot.status !== mappedStatus
     if (statusChanged) {
-      await this.markBotStatus(bot.id, mappedStatus, latestStatus)
+      await this.markBotStatus(bot, mappedStatus, latestStatus)
       bot.status = mappedStatus
     }
+
+    await this.maybeAnnounceRecordingStart(bot)
 
     if (mappedStatus === RecallBotStatus.DONE && statusChanged) {
       await this.captureBotMedia(bot.id)
@@ -195,19 +223,38 @@ export class RecallService {
   }
 
   private async markBotStatus(
-    botId: string,
+    bot: RecallBot,
     status: RecallBotStatus,
     metadata?: Record<string, unknown>,
   ) {
-    await this.prisma.recallBot.updateMany({
-      where: { id: botId },
+    const mergedMetadata: RecallBotMetadata =
+      metadata !== undefined
+        ? {
+            ...this.parseBotMetadata(bot),
+            lastStatus: metadata,
+          }
+        : this.parseBotMetadata(bot)
+
+    const { value: serialized, hasMetadata } =
+      this.serializeBotMetadata(mergedMetadata)
+
+    await this.prisma.recallBot.update({
+      where: { id: bot.id },
       data: {
         status,
-        metadata: metadata
-          ? (metadata as Prisma.InputJsonValue)
-          : Prisma.JsonNull,
+        metadata: serialized,
       },
     })
+
+    bot.metadata = hasMetadata
+      ? (serialized as unknown as Prisma.JsonValue)
+      : (null as Prisma.JsonValue)
+  }
+
+  private shouldResetBot(status: RecallBotStatus) {
+    return (
+      status === RecallBotStatus.CANCELLED || status === RecallBotStatus.FATAL
+    )
   }
 
   private async captureBotMedia(botId: string) {
@@ -271,6 +318,78 @@ export class RecallService {
     }
   }
 
+  private async maybeAnnounceRecordingStart(bot: RecallBotWithEvent) {
+    const metadata = this.parseBotMetadata(bot)
+    if (metadata.recordingMessageSentAt) {
+      return
+    }
+
+    const startTime = await this.getBotStartTime(bot)
+    if (!startTime || startTime.getTime() > Date.now()) {
+      return
+    }
+
+    if (bot.status !== RecallBotStatus.IN_CALL) {
+      return
+    }
+
+    try {
+      await this.announceRecordingStart(bot.id)
+      await this.markRecordingAnnouncementSent(bot)
+    } catch (error) {
+      this.logger.warn(
+        `Failed to announce recording for bot ${bot.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+
+  private async announceRecordingStart(botId: string) {
+    await this.http.axiosRef.post(
+      `${this.apiBaseUrl}/bot/${botId}/send_chat_message/`,
+      {
+        message:
+          "Hello Everyone, I'm here to help you with the meeting, I'm recording the meeting and I'll be summarizing the meeting after it's over.",
+        to: "everyone",
+      },
+      {
+        headers: this.authHeaders,
+      },
+    )
+  }
+
+  private async markRecordingAnnouncementSent(bot: RecallBot) {
+    const metadata: RecallBotMetadata = {
+      ...this.parseBotMetadata(bot),
+      recordingMessageSentAt: new Date().toISOString(),
+    }
+    const { value: serialized, hasMetadata } =
+      this.serializeBotMetadata(metadata)
+
+    await this.prisma.recallBot.update({
+      where: { id: bot.id },
+      data: { metadata: serialized },
+    })
+
+    bot.metadata = hasMetadata
+      ? (serialized as unknown as Prisma.JsonValue)
+      : (null as Prisma.JsonValue)
+  }
+
+  private async getBotStartTime(bot: RecallBotWithEvent): Promise<Date | null> {
+    if (bot.calendarEvent?.startTime) {
+      return bot.calendarEvent.startTime
+    }
+
+    const event = await this.prisma.calendarEvent.findUnique({
+      where: { id: bot.calendarEventId },
+      select: { startTime: true },
+    })
+
+    return event?.startTime ?? null
+  }
+
   private async upsertMeetingMedia(
     botId: string,
     type: MeetingMediaType,
@@ -313,6 +432,45 @@ export class RecallService {
     } else {
       await this.prisma.meetingMedia.create({ data: mediaCreate })
     }
+  }
+
+  async refreshVideoMedia(botId: string): Promise<MeetingMedia | null> {
+    let response: { data: RecallBotApiResponse }
+    try {
+      response = await this.http.axiosRef.get(
+        `${this.apiBaseUrl}/bot/${botId}`,
+        {
+          headers: this.authHeaders,
+        },
+      )
+    } catch (error) {
+      this.logger.warn(
+        `Failed to refresh video media for bot ${botId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      throw new AppError(ErrorCodes.SERVICE_UNAVAILABLE, {
+        params: { resource: "MeetingMedia" },
+      })
+    }
+
+    const recordings = response.data?.recordings ?? []
+    for (const recording of recordings) {
+      const shortcut = recording?.media_shortcuts?.video_mixed
+      if (shortcut?.data?.download_url) {
+        await this.upsertMeetingMedia(
+          botId,
+          MeetingMediaType.VIDEO,
+          shortcut,
+          recording,
+        )
+        return this.prisma.meetingMedia.findFirst({
+          where: { recallBotId: botId, type: MeetingMediaType.VIDEO },
+        })
+      }
+    }
+
+    return null
   }
 
   async proxyMediaDownload(
@@ -370,8 +528,8 @@ export class RecallService {
         return RecallBotStatus.JOINING
       case "in_call_not_recording":
       case "in_call_recording":
-      case "call_ended":
         return RecallBotStatus.IN_CALL
+      case "call_ended":
       case "done":
         return RecallBotStatus.DONE
       case "fatal":
@@ -380,6 +538,31 @@ export class RecallService {
       default:
         return null
     }
+  }
+
+  private parseBotMetadata(bot: RecallBot): RecallBotMetadata {
+    const raw = bot.metadata
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return {}
+    }
+    return raw as RecallBotMetadata
+  }
+
+  private serializeBotMetadata(metadata: RecallBotMetadata) {
+    const hasMetadata = Object.keys(metadata).length > 0
+    return {
+      value: hasMetadata
+        ? (metadata as Prisma.InputJsonValue)
+        : (Prisma.JsonNull as unknown as Prisma.InputJsonValue),
+      hasMetadata,
+    }
+  }
+
+  private isRecallBotNotFound(error: unknown): boolean {
+    if (!isAxiosError(error)) {
+      return false
+    }
+    return error.response?.status === 404
   }
 }
 
@@ -409,4 +592,13 @@ type RecallBotApiResponse = {
   status?: RecallStatusChange
   status_changes?: RecallStatusChange[]
   recordings?: RecallRecording[]
+}
+
+type RecallBotWithEvent = RecallBot & {
+  calendarEvent?: CalendarEvent | null
+}
+
+type RecallBotMetadata = {
+  lastStatus?: Record<string, unknown>
+  recordingMessageSentAt?: string
 }

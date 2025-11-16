@@ -10,4 +10,3 @@ import { AiModule } from "../ai/ai.module"
   exports: [RecallService],
 })
 export class RecallModule {}
-

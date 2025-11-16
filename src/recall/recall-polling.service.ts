@@ -30,6 +30,9 @@ export class RecallPollingService {
       },
       orderBy: { createdAt: "asc" },
       take: this.batchSize,
+      include: {
+        calendarEvent: true,
+      },
     })
 
     for (const bot of bots) {
