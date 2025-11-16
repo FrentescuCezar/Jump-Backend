@@ -15,5 +15,3 @@ export const CurrentDbUser = createParamDecorator(
     return request.dbUser
   },
 )
-
-
