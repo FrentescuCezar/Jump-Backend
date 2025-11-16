@@ -11,6 +11,3 @@ import { IntegrationsModule } from "../integrations/integrations.module"
   exports: [SocialPublishingService],
 })
 export class SocialModule {}
-
-
-

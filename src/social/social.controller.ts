@@ -15,6 +15,3 @@ export class SocialController {
     return { post }
   }
 }
-
-
-

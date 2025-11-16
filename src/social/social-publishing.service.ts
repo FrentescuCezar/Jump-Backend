@@ -15,6 +15,11 @@ import { LinkedInOAuthService } from "../integrations/linkedin/linkedin-oauth.se
 import { AppError } from "../errors/app-error"
 import { ErrorCodes } from "../errors/error-codes"
 
+type PublishResult = {
+  externalPostId: string | null
+  externalUrl: string | null
+}
+
 @Injectable()
 export class SocialPublishingService {
   private readonly logger = new Logger(SocialPublishingService.name)
@@ -52,13 +57,13 @@ export class SocialPublishingService {
     })
 
     try {
-      let externalPostId: string | null = null
+      let publishResult: PublishResult
       switch (post.channel) {
         case SocialChannel.LINKEDIN:
-          externalPostId = await this.publishLinkedIn(post)
+          publishResult = await this.publishLinkedIn(post)
           break
         case SocialChannel.FACEBOOK:
-          externalPostId = await this.publishFacebook(post)
+          publishResult = await this.publishFacebook(post)
           break
         default:
           throw new AppError(ErrorCodes.BAD_REQUEST, {
@@ -70,10 +75,11 @@ export class SocialPublishingService {
         where: { id: post.id },
         data: {
           status: SocialPostStatus.POSTED,
-          externalPostId,
+          externalPostId: publishResult.externalPostId,
+          externalUrl: publishResult.externalUrl,
           publishedAt: new Date(),
           error: null,
-        },
+        } as Prisma.SocialPostUpdateInput,
       })
     } catch (error) {
       const message =
@@ -92,7 +98,7 @@ export class SocialPublishingService {
     }
   }
 
-  private async publishLinkedIn(post: SocialPost) {
+  private async publishLinkedIn(post: SocialPost): Promise<PublishResult> {
     const account = await this.connectedAccounts.findLatestByProvider(
       post.userId,
       ConnectedProvider.LINKEDIN,
@@ -127,43 +133,74 @@ export class SocialPublishingService {
       payload,
       {
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          "Authorization": `Bearer ${accessToken}`,
           "Content-Type": "application/json",
           "X-Restli-Protocol-Version": "2.0.0",
         },
       },
     )
-    return data?.id ?? data?.entityUrn ?? null
+    const externalPostId = data?.id ?? data?.entityUrn ?? null
+    const externalUrl = externalPostId
+      ? `https://www.linkedin.com/feed/update/${externalPostId}`
+      : null
+
+    return { externalPostId, externalUrl }
   }
 
-  private async publishFacebook(post: SocialPost) {
+  private async publishFacebook(post: SocialPost): Promise<PublishResult> {
     const account = await this.connectedAccounts.findLatestByProvider(
       post.userId,
       ConnectedProvider.FACEBOOK,
     )
-    if (!account?.accessToken) {
+    if (!account) {
       throw new AppError(ErrorCodes.BAD_REQUEST, {
         params: { resource: "FacebookAccount" },
       })
     }
 
-    const metadata =
-      ((account.metadata ?? {}) as Record<string, unknown>) ?? {}
-    const pageId = metadata.pageId as string
-    if (!pageId) {
+    const stored = this.extractFacebookPageAccount(account)
+    const attempts: Array<
+      () => Promise<{ pageId: string; accessToken: string }>
+    > = []
+
+    if (stored.pageId && stored.accessToken) {
+      attempts.push(async () => ({
+        pageId: stored.pageId!,
+        accessToken: stored.accessToken!,
+      }))
+    }
+
+    if (account.refreshToken) {
+      attempts.push(() =>
+        this.refreshFacebookPageAccessToken(account, stored.pageId),
+      )
+    }
+
+    if (!attempts.length) {
       throw new AppError(ErrorCodes.BAD_REQUEST, {
         params: { resource: "FacebookAccount" },
       })
     }
 
-    const url = `https://graph.facebook.com/${this.facebookGraphVersion}/${pageId}/feed`
-    const params = new URLSearchParams({
-      message: post.content,
-      access_token: account.accessToken,
-    })
+    let lastError: unknown = null
+    for (const attempt of attempts) {
+      try {
+        const { pageId, accessToken } = await attempt()
+        if (!pageId || !accessToken) {
+          continue
+        }
+        return await this.sendFacebookPost(pageId, accessToken, post.content)
+      } catch (error) {
+        lastError = error
+        this.logger.warn(
+          `Facebook publish attempt failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }
 
-    const { data } = await this.http.axiosRef.post(url, params)
-    return data?.id ?? null
+    throw lastError ?? new Error("Unable to publish to Facebook")
   }
 
   private async ensureLinkedInAccessToken(account: ConnectedAccount) {
@@ -192,8 +229,7 @@ export class SocialPublishingService {
     account: ConnectedAccount,
     accessToken: string,
   ) {
-    const metadata =
-      ((account.metadata ?? {}) as Record<string, unknown>) ?? {}
+    const metadata = ((account.metadata ?? {}) as Record<string, unknown>) ?? {}
     if (typeof metadata.urn === "string" && metadata.urn.length) {
       return metadata.urn
     }
@@ -228,7 +264,91 @@ export class SocialPublishingService {
     }
     return expiresAt.getTime() <= Date.now() + 60 * 1000
   }
+
+  private extractFacebookPageAccount(account: ConnectedAccount) {
+    const metadata = ((account.metadata ?? {}) as Record<string, unknown>) ?? {}
+    const pageId =
+      (metadata.pageId as string | undefined) ??
+      account.providerAccountId ??
+      null
+    const accessToken = account.accessToken ?? null
+    return { pageId, accessToken }
+  }
+
+  private async refreshFacebookPageAccessToken(
+    account: ConnectedAccount,
+    preferredPageId?: string | null,
+  ) {
+    if (!account.refreshToken) {
+      throw new AppError(ErrorCodes.FORBIDDEN, {
+        params: { resource: "FacebookAccount" },
+      })
+    }
+    const pages = await this.fetchFacebookPages(account.refreshToken)
+    const page =
+      (preferredPageId && pages.find((p) => p.id === preferredPageId)) ??
+      pages[0]
+    if (!page?.id || !page.access_token) {
+      throw new Error("Unable to refresh Facebook page access token")
+    }
+    const metadata = ((account.metadata ?? {}) as Record<string, unknown>) ?? {}
+    await this.prisma.connectedAccount.update({
+      where: { id: account.id },
+      data: {
+        providerAccountId: page.id,
+        accessToken: page.access_token,
+        metadata: {
+          ...metadata,
+          pageId: page.id,
+          pageName: page.name,
+          category: page.category,
+        } as Prisma.InputJsonValue,
+        linkedAt: new Date(),
+      },
+    })
+    return { pageId: page.id, accessToken: page.access_token }
+  }
+
+  private async fetchFacebookPages(userAccessToken: string) {
+    const url = `https://graph.facebook.com/${this.facebookGraphVersion}/me/accounts`
+    const { data } = await this.http.axiosRef.get<{ data: FacebookPage[] }>(
+      url,
+      {
+        params: { access_token: userAccessToken },
+      },
+    )
+    return data?.data ?? []
+  }
+
+  private async sendFacebookPost(
+    pageId: string,
+    accessToken: string,
+    content: string,
+  ): Promise<PublishResult> {
+    const url = `https://graph.facebook.com/${this.facebookGraphVersion}/${pageId}/feed`
+    const params = new URLSearchParams({
+      message: content,
+      access_token: accessToken,
+    })
+
+    const { data } = await this.http.axiosRef.post(url, params)
+    const externalPostId = data?.id ?? null
+    let externalUrl: string | null = null
+    if (externalPostId) {
+      const [pageIdPart, postIdPart] = externalPostId.split("_")
+      if (pageIdPart && postIdPart) {
+        externalUrl = `https://www.facebook.com/${pageIdPart}/posts/${postIdPart}`
+      } else if (pageId) {
+        externalUrl = `https://www.facebook.com/${pageId}`
+      }
+    }
+    return { externalPostId, externalUrl }
+  }
 }
 
-
-
+type FacebookPage = {
+  id: string
+  name: string
+  access_token: string
+  category?: string
+}
