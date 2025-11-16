@@ -24,10 +24,11 @@ export function createTestModule(): TestingModuleBuilder {
     .overrideProvider(KeycloakAdminService)
     .useValue({
       findUserByEmail: jest.fn().mockResolvedValue(null),
-      findUserById: jest.fn().mockResolvedValue({ id: "user-123", email: "test@example.com" }),
+      findUserById: jest
+        .fn()
+        .mockResolvedValue({ id: "user-123", email: "test@example.com" }),
       createUser: jest.fn().mockResolvedValue({ id: "user-123" }),
       updateUser: jest.fn().mockResolvedValue({}),
       deleteUser: jest.fn().mockResolvedValue(undefined),
     })
 }
-
