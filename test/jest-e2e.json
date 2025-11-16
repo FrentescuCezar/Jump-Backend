@@ -1,29 +1,13 @@
 {
-  "preset": "ts-jest",
   "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": ".",
   "testEnvironment": "node",
   "testRegex": ".e2e-spec.ts$",
   "transform": {
-    "^.+\\.(t|j)s$": [
-      "ts-jest",
-      {
-        "useESM": false
-      }
-    ]
+    "^.+\\.(t|j)s$": "ts-jest"
   },
-  "transformIgnorePatterns": [
-    "node_modules/(?!(p-queue|p-timeout|eventemitter3|@keycloak|url-join)/)"
-  ],
   "moduleNameMapper": {
     "^@/(.*)$": "<rootDir>/../src/$1"
   },
-  "setupFilesAfterEnv": ["<rootDir>/setup-e2e.ts"],
-  "globals": {
-    "ts-jest": {
-      "tsconfig": "tsconfig.json",
-      "diagnostics": false,
-      "useESM": false
-    }
-  }
+  "setupFilesAfterEnv": ["<rootDir>/setup-e2e.ts"]
 }

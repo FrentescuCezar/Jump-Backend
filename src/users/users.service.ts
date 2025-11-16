@@ -8,7 +8,6 @@ import { AppError } from "../errors/app-error"
 import { ErrorCodes, FieldErrorCodes } from "../errors/error-codes"
 import { UserMapper } from "./user.mapper"
 import type { AuthenticatedUser } from "../common/types/authenticated-user"
-import type UserRepresentation from "@keycloak/keycloak-admin-client/lib/defs/userRepresentation"
 
 @Injectable()
 export class UsersService {
@@ -65,16 +64,12 @@ export class UsersService {
         email,
     })
 
-    const brand =
-      this.extractAttributeValue(profile.attributes, "brand") ?? "default"
-
     try {
       return await this.prisma.user.create({
         data: {
           keycloakId: authUser.sub,
           email,
           name,
-          brand,
         },
       })
     } catch (error) {
@@ -118,21 +113,6 @@ export class UsersService {
     return parts.length ? parts : fallback
   }
 
-  private extractAttributeValue(
-    attributes: UserRepresentation["attributes"] | undefined,
-    key: string,
-  ): string | undefined {
-    if (!attributes) return undefined
-    const value = attributes[key]
-    if (Array.isArray(value)) {
-      return value[0]
-    }
-    if (typeof value === "string") {
-      return value
-    }
-    return undefined
-  }
-
   private async validateEmailNotExists(email: string): Promise<void> {
     const emailExists = await this.prisma.user.findUnique({
       where: { email },
@@ -152,9 +132,6 @@ export class UsersService {
       firstName: dto.firstName,
       lastName: dto.lastName,
       password: dto.password,
-      attributes: {
-        brand: [dto.brand],
-      },
     })
   }
 
@@ -171,7 +148,6 @@ export class UsersService {
         keycloakId,
         email: dto.email,
         name: fullName,
-        brand: dto.brand,
       },
     })
   }

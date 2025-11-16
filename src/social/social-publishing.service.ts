@@ -82,11 +82,6 @@ export class SocialPublishingService {
         } as Prisma.SocialPostUpdateInput,
       })
     } catch (error) {
-      // If this was an application-level error (e.g., missing account),
-      // rethrow to preserve the original HTTP status (400/403/etc).
-      if (error instanceof AppError) {
-        throw error
-      }
       const message =
         error instanceof Error ? error.message : "Failed to publish post"
       await this.prisma.socialPost.update({
@@ -291,12 +286,9 @@ export class SocialPublishingService {
     }
     const pages = await this.fetchFacebookPages(account.refreshToken)
     const page =
-      (preferredPageId
-        ? pages.find((p) => p.id === preferredPageId)
-        : undefined) ??
-      pages[0] ??
-      undefined
-    if (!page || !page.id || !page.access_token) {
+      (preferredPageId && pages.find((p) => p.id === preferredPageId)) ??
+      pages[0]
+    if (!page?.id || !page.access_token) {
       throw new Error("Unable to refresh Facebook page access token")
     }
     const metadata = ((account.metadata ?? {}) as Record<string, unknown>) ?? {}

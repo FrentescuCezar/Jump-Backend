@@ -4,4 +4,3 @@ export interface KeycloakPrincipal {
   name?: string
   email?: string
 }
-

@@ -1,64 +1,49 @@
-import { Injectable, BadRequestException } from "@nestjs/common"
+import { BadRequestException, Injectable } from "@nestjs/common"
+import {
+  AutomationPreference,
+  ConnectedAccount,
+  ConnectedProvider,
+  MeetingPreference,
+} from "@prisma/client"
 import { PrismaService } from "../../prisma/prisma.service"
-import { ConnectedProvider } from "@prisma/client"
-import type {
+import {
   OnboardingStateDto,
   OnboardingGoogleAccountDto,
-  SocialConnectionsDto,
-  MeetingPreferenceDto,
-  AutomationPreferencesDto,
 } from "./dto/onboarding-state.dto"
-import type { UpdateOnboardingPreferencesDto } from "./dto/update-onboarding-preferences.dto"
+import { UpdateOnboardingPreferencesDto } from "./dto/update-onboarding-preferences.dto"
 
 @Injectable()
 export class OnboardingService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getState(userId: string): Promise<OnboardingStateDto> {
-    const [accounts, meetingPreference, user] = await Promise.all([
-      this.prisma.connectedAccount.findMany({
-        where: { userId },
-      }),
-      this.findOrCreateMeetingPreference(userId),
-      this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { onboardingCompletedAt: true },
-      }),
-    ])
+    const [accounts, meetingPreference, automationPreference, user] =
+      await Promise.all([
+        this.prisma.connectedAccount.findMany({
+          where: { userId },
+          orderBy: { linkedAt: "asc" },
+        }),
+        this.findOrCreateMeetingPreference(userId),
+        this.findOrCreateAutomationPreference(userId),
+        this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { onboardingCompletedAt: true },
+        }),
+      ])
 
-    const googleAccounts = accounts
-      .filter((acc) => acc.provider === ConnectedProvider.GOOGLE_CALENDAR)
-      .map((acc) => this.toGoogleAccountDto(acc))
-
-    const hasGoogleCalendar = googleAccounts.length > 0
-
-    const socialConnections = await this.getSocialConnections(userId)
-
-    const automationPreferences =
-      await this.findOrCreateAutomationPreferences(userId)
-
-    const isComplete = !!user?.onboardingCompletedAt && hasGoogleCalendar
-
-    return {
-      hasGoogleCalendar,
-      isComplete,
-      completedAt: user?.onboardingCompletedAt?.toISOString() ?? null,
-      googleAccounts,
-      socialConnections,
-      meetingPreference: {
-        leadMinutes: meetingPreference.leadMinutes,
-        defaultNotetaker: meetingPreference.defaultNotetaker,
-      },
-      automationPreferences,
-    }
+    return this.buildState({
+      accounts,
+      meetingPreference,
+      automationPreference,
+      onboardingCompletedAt: user?.onboardingCompletedAt ?? null,
+    })
   }
 
   async updatePreferences(
     userId: string,
     dto: UpdateOnboardingPreferencesDto,
   ): Promise<OnboardingStateDto> {
-    return await this.prisma.$transaction(async (tx) => {
-      // Update meeting preference
+    await this.prisma.$transaction(async (tx) => {
       await tx.meetingPreference.upsert({
         where: { userId },
         create: {
@@ -72,111 +57,134 @@ export class OnboardingService {
         },
       })
 
-      // Update automation preferences (stored in user metadata for now)
-      // Since AutomationPreference model doesn't exist, we'll store it in user metadata
-      // or create a simple approach
-      await this.updateAutomationPreferences(userId, dto)
+      await tx.automationPreference.upsert({
+        where: { userId },
+        create: {
+          userId,
+          generateTranscripts: dto.generateTranscripts,
+          createEmailDrafts: dto.createEmailDrafts,
+          generateSocialPosts: dto.generateSocialPosts,
+        },
+        update: {
+          generateTranscripts: dto.generateTranscripts,
+          createEmailDrafts: dto.createEmailDrafts,
+          generateSocialPosts: dto.generateSocialPosts,
+        },
+      })
 
-      // Check if completing onboarding
       if (dto.completeOnboarding) {
-        const googleCalendarCount = await tx.connectedAccount.count({
+        const hasGoogleAccount = await tx.connectedAccount.count({
           where: {
             userId,
             provider: ConnectedProvider.GOOGLE_CALENDAR,
           },
         })
 
-        if (googleCalendarCount === 0) {
+        if (!hasGoogleAccount) {
           throw new BadRequestException(
-            "Cannot complete onboarding without Google Calendar connection",
+            "Connect at least one Google Calendar to complete onboarding",
           )
         }
 
         await tx.user.update({
           where: { id: userId },
-          data: {
-            onboardingCompletedAt: new Date(),
-          },
+          data: { onboardingCompletedAt: new Date() },
         })
       }
-
-      return this.getState(userId)
     })
+
+    return this.getState(userId)
   }
 
   private async findOrCreateMeetingPreference(userId: string) {
     let preference = await this.prisma.meetingPreference.findUnique({
       where: { userId },
     })
-
     if (!preference) {
       preference = await this.prisma.meetingPreference.create({
-        data: {
-          userId,
-          leadMinutes: 10,
-          defaultNotetaker: false,
-        },
+        data: { userId },
       })
     }
-
     return preference
   }
 
-  private async findOrCreateAutomationPreferences(
-    userId: string,
-  ): Promise<AutomationPreferencesDto> {
-    // TODO: Add AutomationPreference model to Prisma schema
-    // For now, return defaults since the model doesn't exist yet
-    // The preferences are stored but not persisted between requests
-    return {
-      generateTranscripts: false,
-      createEmailDrafts: false,
-      generateSocialPosts: false,
-    }
-  }
-
-  private async updateAutomationPreferences(
-    userId: string,
-    dto: UpdateOnboardingPreferencesDto,
-  ): Promise<void> {
-    // TODO: Add AutomationPreference model to Prisma schema
-    // For now, this is a no-op since the model doesn't exist
-    // The preferences will be returned from the DTO but not persisted
-  }
-
-  private async getSocialConnections(
-    userId: string,
-  ): Promise<SocialConnectionsDto> {
-    const accounts = await this.prisma.connectedAccount.findMany({
+  private async findOrCreateAutomationPreference(userId: string) {
+    let preference = await this.prisma.automationPreference.findUnique({
       where: { userId },
     })
+    if (!preference) {
+      preference = await this.prisma.automationPreference.create({
+        data: { userId },
+      })
+    }
+    return preference
+  }
+
+  private buildState({
+    accounts,
+    meetingPreference,
+    automationPreference,
+    onboardingCompletedAt,
+  }: {
+    accounts: ConnectedAccount[]
+    meetingPreference: MeetingPreference
+    automationPreference: AutomationPreference
+    onboardingCompletedAt: Date | null
+  }): OnboardingStateDto {
+    const googleAccounts = accounts.filter(
+      (account) => account.provider === ConnectedProvider.GOOGLE_CALENDAR,
+    )
+
+    const hasGoogleCalendar = googleAccounts.length > 0
 
     return {
-      linkedin: accounts.some(
-        (acc) => acc.provider === ConnectedProvider.LINKEDIN,
+      hasGoogleCalendar,
+      isComplete: hasGoogleCalendar && !!onboardingCompletedAt,
+      completedAt: onboardingCompletedAt
+        ? onboardingCompletedAt.toISOString()
+        : null,
+      googleAccounts: googleAccounts.map((account) =>
+        this.toGoogleAccountDto(account),
       ),
-      facebook: accounts.some(
-        (acc) => acc.provider === ConnectedProvider.FACEBOOK,
-      ),
+      socialConnections: {
+        linkedin: accounts.some(
+          (account) => account.provider === ConnectedProvider.LINKEDIN,
+        ),
+        facebook: accounts.some(
+          (account) => account.provider === ConnectedProvider.FACEBOOK,
+        ),
+      },
+      meetingPreference: {
+        leadMinutes: meetingPreference.leadMinutes,
+        defaultNotetaker: meetingPreference.defaultNotetaker,
+      },
+      automationPreferences: {
+        generateTranscripts: automationPreference.generateTranscripts,
+        createEmailDrafts: automationPreference.createEmailDrafts,
+        generateSocialPosts: automationPreference.generateSocialPosts,
+      },
     }
   }
 
-  private toGoogleAccountDto(account: {
-    id: string
-    providerAccountId: string
-    label: string | null
-    linkedAt: Date
-    lastSyncedAt: Date | null
-    metadata: unknown
-  }): OnboardingGoogleAccountDto {
-    const metadata = account.metadata as { email?: string } | null
+  private toGoogleAccountDto(
+    account: ConnectedAccount,
+  ): OnboardingGoogleAccountDto {
+    const metadata = (account.metadata ?? null) as Record<
+      string,
+      unknown
+    > | null
+    const email =
+      metadata && typeof metadata.email === "string" ? metadata.email : null
+
     return {
       id: account.id,
       providerAccountId: account.providerAccountId,
-      email: metadata?.email ?? null,
-      label: account.label,
+      email,
+      label: account.label ?? email,
       linkedAt: account.linkedAt.toISOString(),
-      lastSyncedAt: account.lastSyncedAt?.toISOString() ?? null,
+      lastSyncedAt: account.lastSyncedAt
+        ? account.lastSyncedAt.toISOString()
+        : null,
     }
   }
 }

@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common"
-import { Cron, CronExpression } from "@nestjs/schedule"
+import { Cron } from "@nestjs/schedule"
 import { RecallBotStatus } from "@prisma/client"
 import { PrismaService } from "../../prisma/prisma.service"
 import { RecallService } from "./recall.service"
@@ -16,7 +16,7 @@ export class RecallPollingService {
     this.batchSize = Number(process.env.RECALL_POLL_BATCH_SIZE ?? 25)
   }
 
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron("*/15 * * * * *")
   async pollActiveBots() {
     const bots = await this.prisma.recallBot.findMany({
       where: {
@@ -30,6 +30,9 @@ export class RecallPollingService {
       },
       orderBy: { createdAt: "asc" },
       take: this.batchSize,
+      include: {
+        calendarEvent: true,
+      },
     })
 
     for (const bot of bots) {

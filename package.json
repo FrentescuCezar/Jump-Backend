@@ -15,7 +15,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/src/main.js",
+    "start:prod": "node dist/main",
     "docker": "docker network create jump-network 2>/dev/null || true && docker compose -p jump-backend -f infra/dev/docker-compose.yml up --build",
     "docker:prod": "docker network create jump-network 2>/dev/null || true && docker compose -p jump-backend -f infra/prod/docker-compose.yml up --build",
     "docker:down": "docker compose -p jump-backend -f infra/dev/docker-compose.yml down",
@@ -23,10 +23,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "test:unit": "jest --testPathIgnorePatterns=e2e",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:ci": "jest --ci --coverage --maxWorkers=2"
+    "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -93,26 +91,12 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": [
-        "ts-jest",
-        {
-          "useESM": false
-        }
-      ]
+      "^.+\\.(t|j)s$": "ts-jest"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
-    "testEnvironment": "node",
-    "transformIgnorePatterns": [
-      "node_modules/(?!(p-queue|p-timeout|eventemitter3)/)"
-    ],
-    "extensionsToTreatAsEsm": [
-      ".ts"
-    ],
-    "moduleNameMapper": {
-      "^@/(.*)$": "<rootDir>/$1"
-    }
+    "testEnvironment": "node"
   }
 }

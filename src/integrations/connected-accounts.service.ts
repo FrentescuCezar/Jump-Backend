@@ -32,10 +32,7 @@ export class ConnectedAccountsService {
     })
   }
 
-  async findLatestByProvider(
-    userId: string,
-    provider: ConnectedProvider,
-  ): Promise<ConnectedAccount | null> {
+  async findLatestByProvider(userId: string, provider: ConnectedProvider) {
     return this.prisma.connectedAccount.findFirst({
       where: { userId, provider },
       orderBy: { linkedAt: "desc" },

@@ -13,15 +13,6 @@ export class RegisteredUserDto {
   @ApiProperty({ example: "Alex Mercer" })
   name!: string
 
-  @ApiProperty({ example: "toyota" })
-  brand!: string
-
   @ApiProperty()
   createdAt!: Date
 }
-
-
-
-
-
-

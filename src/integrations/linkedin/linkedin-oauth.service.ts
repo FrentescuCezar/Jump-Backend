@@ -1,176 +1,364 @@
 import { Injectable, Logger } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
 import { HttpService } from "@nestjs/axios"
-import * as jwt from "jsonwebtoken"
-import { ConnectedAccountsService } from "../connected-accounts.service"
+import { JwtPayload, sign, verify } from "jsonwebtoken"
 import { ConnectedProvider } from "@prisma/client"
+import { ConnectedAccountsService } from "../connected-accounts.service"
+
+interface StatePayload extends JwtPayload {
+  userId: string
+  redirectPath?: string
+}
+
+type LinkedInTokenResponse = {
+  access_token: string
+  expires_in: number
+  refresh_token?: string
+  id_token?: string // OpenID Connect ID token
+}
 
 @Injectable()
 export class LinkedInOAuthService {
   private readonly logger = new Logger(LinkedInOAuthService.name)
-  readonly settingsRedirectBase: string
+  private readonly clientId: string
+  private readonly clientSecret: string
+  private readonly redirectUri: string
+  private readonly scopes: string[]
+  private readonly stateSecret: string
+  private readonly appOrigin: string
 
   constructor(
     private readonly configService: ConfigService,
     private readonly http: HttpService,
     private readonly connectedAccounts: ConnectedAccountsService,
   ) {
-    const appOrigin = this.configService.getOrThrow<string>("APP_ORIGIN")
-    this.settingsRedirectBase = `${appOrigin}/settings/integrations?provider=linkedin`
-  }
-
-  buildAuthorizationUrl(userId: string, redirectPath?: string): string {
-    const clientId = this.configService.getOrThrow<string>("LINKEDIN_CLIENT_ID")
-    const redirectUri = this.configService.getOrThrow<string>(
+    this.clientId = this.configService.getOrThrow<string>("LINKEDIN_CLIENT_ID")
+    this.clientSecret = this.configService.getOrThrow<string>(
+      "LINKEDIN_CLIENT_SECRET",
+    )
+    this.redirectUri = this.configService.getOrThrow<string>(
       "LINKEDIN_REDIRECT_URI",
     )
-    const stateSecret =
-      this.configService.get<string>("LINKEDIN_STATE_SECRET") ||
+    this.scopes = ["openid", "profile", "email", "w_member_social"]
+    this.stateSecret =
+      this.configService.get<string>("LINKEDIN_STATE_SECRET") ??
       this.configService.getOrThrow<string>("NEXTAUTH_SECRET")
+    this.appOrigin = this.configService.getOrThrow<string>("APP_ORIGIN")
+  }
 
-    const statePayload: { userId: string; redirectPath?: string } = { userId }
-    if (redirectPath) {
-      statePayload.redirectPath = redirectPath
-    }
-
-    const state = jwt.sign(statePayload, stateSecret, { expiresIn: "15m" })
-
+  buildAuthorizationUrl(userId: string, redirectPath?: string) {
+    const state = this.signState({
+      userId,
+      redirectPath: this.sanitizeRedirectPath(redirectPath),
+    })
     const params = new URLSearchParams({
       response_type: "code",
-      client_id: clientId,
-      redirect_uri: redirectUri,
+      client_id: this.clientId,
+      redirect_uri: this.redirectUri,
+      scope: this.scopes.join(" "),
       state,
-      scope: "openid profile email w_member_social",
     })
-
     return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`
   }
 
-  async handleCallback(
-    code: string,
-    state: string,
-  ): Promise<{ account: any; redirectUri: string }> {
-    const stateSecret =
-      this.configService.get<string>("LINKEDIN_STATE_SECRET") ||
-      this.configService.getOrThrow<string>("NEXTAUTH_SECRET")
-
-    let statePayload: { userId: string; redirectPath?: string }
+  async handleCallback(code: string, stateToken: string) {
     try {
-      statePayload = jwt.verify(state, stateSecret) as {
-        userId: string
-        redirectPath?: string
+      this.logger.log("Verifying state token")
+      const state = this.verifyState(stateToken)
+      this.logger.log(`State verified for user: ${state.userId}`)
+
+      this.logger.log("Exchanging authorization code for tokens")
+      const tokens = await this.exchangeCode(code)
+      this.logger.log("Token exchange successful")
+      this.logger.log(`Token response includes id_token: ${!!tokens.id_token}`)
+
+      this.logger.log("Fetching user profile")
+      // Try to get profile from ID token first, then fall back to API
+      let profile: {
+        id: string
+        localizedFirstName?: string
+        localizedLastName?: string
+        email?: string
       }
-    } catch (error) {
-      this.logger.error("Invalid state token", error)
-      throw new Error("Invalid state token")
-    }
 
-    const clientId = this.configService.getOrThrow<string>("LINKEDIN_CLIENT_ID")
-    const clientSecret = this.configService.getOrThrow<string>(
-      "LINKEDIN_CLIENT_SECRET",
-    )
-    const oauthRedirectUri = this.configService.getOrThrow<string>(
-      "LINKEDIN_REDIRECT_URI",
-    )
-
-    const tokenResponse = await this.http.axiosRef.post<{
-      access_token: string
-      expires_in: number
-      refresh_token: string
-      id_token?: string
-    }>(
-      "https://www.linkedin.com/oauth/v2/accessToken",
-      new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: oauthRedirectUri,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      },
-    )
-
-    const { access_token, expires_in, refresh_token, id_token } =
-      tokenResponse.data
-
-    let providerAccountId = ""
-    if (id_token) {
-      try {
-        const decoded = jwt.decode(id_token) as { sub?: string }
-        providerAccountId = decoded.sub || ""
-      } catch (error) {
-        this.logger.warn("Failed to decode LinkedIn ID token", error)
+      if (tokens.id_token) {
+        // With OpenID Connect, the ID token contains all user info we need
+        profile = this.extractProfileFromIdToken(tokens.id_token)
+        this.logger.log(
+          `Profile extracted from ID token: ${profile.id}, email: ${profile.email ? "present" : "missing"}`,
+        )
+      } else {
+        // No ID token - this shouldn't happen with OpenID Connect scopes
+        this.logger.error(
+          "No ID token received from LinkedIn. This indicates OpenID Connect is not properly configured.",
+        )
+        throw new Error(
+          "LinkedIn did not provide an ID token. Please ensure OpenID Connect is enabled in your LinkedIn app settings.",
+        )
       }
-    }
 
-    if (!providerAccountId) {
-      // Fallback: fetch user info from LinkedIn API
-      const userResponse = await this.http.axiosRef.get<{ id: string }>(
-        "https://api.linkedin.com/v2/me",
+      const urn = profile?.id ? `urn:li:person:${profile.id}` : null
+
+      this.logger.log("Upserting connected account")
+      const account = await this.connectedAccounts.upsertAccount(
+        state.userId,
+        ConnectedProvider.LINKEDIN,
+        profile.id ?? state.userId,
         {
-          headers: {
-            Authorization: `Bearer ${access_token}`,
+          label:
+            `${profile.localizedFirstName ?? ""} ${profile.localizedLastName ?? ""}`.trim() ||
+            "LinkedIn",
+          scopes: this.scopes,
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token ?? null,
+          expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
+          metadata: {
+            urn,
+            localizedFirstName: profile.localizedFirstName,
+            localizedLastName: profile.localizedLastName,
           },
         },
       )
-      providerAccountId = userResponse.data.id
+      this.logger.log("Account upserted successfully")
+
+      return {
+        account,
+        redirectUri: this.resolveRedirectUri(state.redirectPath),
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error in handleCallback: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        error instanceof Error ? error.stack : undefined,
+      )
+      throw error
     }
-
-    const account = await this.connectedAccounts.upsertAccount(
-      statePayload.userId,
-      ConnectedProvider.LINKEDIN,
-      providerAccountId,
-      {
-        accessToken: access_token,
-        refreshToken: refresh_token,
-        expiresAt: new Date(Date.now() + expires_in * 1000),
-        scopes: ["openid", "profile", "email", "w_member_social"],
-      },
-    )
-
-    const redirectPath = statePayload.redirectPath || ""
-    const redirectUri = redirectPath
-      ? `${this.settingsRedirectBase}&redirectPath=${encodeURIComponent(redirectPath)}&status=success`
-      : `${this.settingsRedirectBase}&status=success`
-
-    return { account, redirectUri }
   }
 
   async refreshAccessToken(
     refreshToken: string,
-  ): Promise<{ access_token: string; expires_in: number }> {
-    const clientId = this.configService.getOrThrow<string>("LINKEDIN_CLIENT_ID")
-    const clientSecret = this.configService.getOrThrow<string>(
-      "LINKEDIN_CLIENT_SECRET",
-    )
-
-    const response = await this.http.axiosRef.post<{
-      access_token: string
-      expires_in: number
-      refresh_token?: string
-    }>(
+  ): Promise<LinkedInTokenResponse> {
+    const params = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+    })
+    const { data } = await this.http.axiosRef.post<LinkedInTokenResponse>(
       "https://www.linkedin.com/oauth/v2/accessToken",
-      new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
+      params.toString(),
       {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
       },
     )
+    return data
+  }
 
-    return {
-      access_token: response.data.access_token,
-      expires_in: response.data.expires_in,
+  private async exchangeCode(code: string): Promise<LinkedInTokenResponse> {
+    const params = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: this.redirectUri,
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+    })
+    try {
+      const { data } = await this.http.axiosRef.post<LinkedInTokenResponse>(
+        "https://www.linkedin.com/oauth/v2/accessToken",
+        params.toString(),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        },
+      )
+      return data
+    } catch (error: any) {
+      this.logger.error(
+        `Token exchange failed: ${error?.response?.data || error?.message || String(error)}`,
+      )
+      if (error?.response?.data) {
+        this.logger.error(
+          `LinkedIn response: ${JSON.stringify(error.response.data)}`,
+        )
+      }
+      throw error
     }
   }
-}
 
+  private extractProfileFromIdToken(idToken: string): {
+    id: string
+    localizedFirstName?: string
+    localizedLastName?: string
+    email?: string
+  } {
+    // Decode JWT without verification (ID token is from LinkedIn, we trust it)
+    const parts = idToken.split(".")
+    if (parts.length !== 3) {
+      throw new Error("Invalid ID token format")
+    }
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf-8"),
+    ) as {
+      sub: string
+      given_name?: string
+      family_name?: string
+      name?: string
+      email?: string
+    }
+
+    return {
+      id: payload.sub,
+      localizedFirstName: payload.given_name,
+      localizedLastName: payload.family_name,
+      email: payload.email,
+    }
+  }
+
+  private async fetchProfile(accessToken: string) {
+    try {
+      // Try using People API with version parameter
+      const { data: profileData } = await this.http.axiosRef.get<{
+        id: string
+        localizedFirstName?: string
+        localizedLastName?: string
+        firstName?: {
+          localized?: Record<string, string>
+          preferredLocale?: {
+            country?: string
+            language?: string
+          }
+        }
+        lastName?: {
+          localized?: Record<string, string>
+          preferredLocale?: {
+            country?: string
+            language?: string
+          }
+        }
+      }>("https://api.linkedin.com/v2/me", {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "X-Restli-Protocol-Version": "2.0.0",
+        },
+        params: {
+          projection:
+            "(id,localizedFirstName,localizedLastName,firstName,lastName)",
+        },
+      })
+
+      // Fetch email separately using the email endpoint
+      let email: string | undefined
+      try {
+        const { data: emailData } = await this.http.axiosRef.get<{
+          elements?: Array<{
+            "handle~"?: {
+              emailAddress?: string
+            }
+          }>
+        }>("https://api.linkedin.com/v2/emailAddress", {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+          params: {
+            q: "members",
+            projection: "(elements*(handle~))",
+          },
+        })
+        email = emailData.elements?.[0]?.["handle~"]?.emailAddress
+      } catch (emailError: any) {
+        this.logger.warn(
+          `Failed to fetch email: ${emailError?.response?.data || emailError?.message}`,
+        )
+        // Email is optional, continue without it
+      }
+
+      this.logger.log(
+        `Profile data received: ${JSON.stringify({ id: profileData.id, hasEmail: !!email })}`,
+      )
+
+      // Extract names - handle both formats
+      const firstName =
+        profileData.localizedFirstName ||
+        profileData.firstName?.localized?.[
+          `${profileData.firstName.preferredLocale?.language}_${profileData.firstName.preferredLocale?.country}`
+        ] ||
+        Object.values(profileData.firstName?.localized || {})[0]
+
+      const lastName =
+        profileData.localizedLastName ||
+        profileData.lastName?.localized?.[
+          `${profileData.lastName.preferredLocale?.language}_${profileData.lastName.preferredLocale?.country}`
+        ] ||
+        Object.values(profileData.lastName?.localized || {})[0]
+
+      return {
+        id: profileData.id,
+        localizedFirstName: firstName,
+        localizedLastName: lastName,
+        email,
+      }
+    } catch (error: any) {
+      this.logger.error(
+        `Profile fetch failed: ${error?.response?.data || error?.message || String(error)}`,
+      )
+      if (error?.response?.data) {
+        this.logger.error(
+          `LinkedIn response: ${JSON.stringify(error.response.data)}`,
+        )
+      }
+      if (error?.response?.status) {
+        this.logger.error(`HTTP status: ${error.response.status}`)
+      }
+      throw error
+    }
+  }
+
+  private signState(payload: StatePayload) {
+    return sign(
+      {
+        ...payload,
+        ts: Date.now(),
+      },
+      this.stateSecret,
+      { expiresIn: "15m" },
+    )
+  }
+
+  private verifyState(token: string): StatePayload {
+    const payload = verify(token, this.stateSecret) as StatePayload
+    if (!payload.userId) {
+      throw new Error("Invalid LinkedIn state payload")
+    }
+    return payload
+  }
+
+  private sanitizeRedirectPath(path?: string) {
+    if (!path || !path.startsWith("/")) {
+      return undefined
+    }
+    return path
+  }
+
+  private resolveRedirectUri(redirectPath?: string) {
+    if (!redirectPath) {
+      return this.settingsRedirectBase
+    }
+    try {
+      const url = new URL(redirectPath, this.appOrigin)
+      if (url.origin !== this.appOrigin) {
+        return this.settingsRedirectBase
+      }
+      return url.toString()
+    } catch {
+      return this.settingsRedirectBase
+    }
+  }
+
+  get settingsRedirectBase() {
+    return `${this.appOrigin}/settings/integrations?provider=linkedin`
+  }
+}

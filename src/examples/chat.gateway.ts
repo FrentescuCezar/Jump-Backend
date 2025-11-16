@@ -22,7 +22,9 @@ import {
 import { ChatTokenService } from "./services/chat-token.service"
 import { ChatService } from "./services/chat.service"
 import { NotificationsService } from "./services/notifications.service"
+import { MeetingChatService } from "../meetings/services/meeting-chat.service"
 import type { ChatMessagePayload, ChatNotificationPayload } from "./types"
+import type { MeetingChatMessagePayload } from "../meetings/types/chat.types"
 
 type ClientToServerEvents = {
   "chat:join": (roomSlug: string) => void
@@ -30,6 +32,15 @@ type ClientToServerEvents = {
   "chat:send": (payload: { roomSlug: string; body: string }) => void
   "chat:typing": (payload: { roomSlug: string }) => void
   "chat:read": (payload: { roomSlug: string; messageIds: string[] }) => void
+  "meeting:join": (payload: { meetingId: string }) => void
+  "meeting:leave": (payload: { meetingId: string }) => void
+  "meeting:send": (payload: {
+    meetingId: string
+    body: string
+    clientMessageId?: string
+  }) => void
+  "meeting:typing": (payload: { meetingId: string }) => void
+  "meeting:read": (payload: { meetingId: string; messageIds: string[] }) => void
   "user:ping": () => void
 }
 
@@ -50,12 +61,36 @@ type ServerToClientEvents = {
     userId: string
     status: "online" | "away"
   }) => void
+  "meeting:new": (message: MeetingChatMessagePayload) => void
+  "meeting:typing": (payload: {
+    meetingId: string
+    userId: string
+    name: string
+  }) => void
+  "meeting:error": (payload: {
+    message: string
+    clientMessageId?: string
+  }) => void
+  "meeting:read": (payload: {
+    meetingId: string
+    userId: string
+    updates: { messageId: string; readBy: string[] }[]
+  }) => void
+  "meeting:presence": (payload: {
+    meetingId: string
+    userCount: number
+  }) => void
   "notification:new": (payload: ChatNotificationPayload) => void
+  "calendar:sync": (payload: {
+    userId: string
+    providerSyncedAt: string
+  }) => void
 }
 
 interface SocketData {
   userId: string
   name: string
+  email?: string | null
   rooms?: Set<string>
 }
 
@@ -98,6 +133,11 @@ export class ChatGateway
     userId: string
     name: string
   }>()
+  private readonly meetingTyping$ = new Subject<{
+    meetingId: string
+    userId: string
+    name: string
+  }>()
   private readonly presence$ = new Subject<{ userId: string }>()
   private readonly subscriptions: Subscription[] = []
   private readonly userRooms = new Map<string, Map<string, number>>()
@@ -105,6 +145,7 @@ export class ChatGateway
   constructor(
     private readonly chatTokens: ChatTokenService,
     private readonly chatService: ChatService,
+    private readonly meetingChat: MeetingChatService,
     private readonly notifications: NotificationsService,
   ) {}
 
@@ -119,6 +160,20 @@ export class ChatGateway
         )
         .subscribe((event) => {
           this.server.to(event.roomSlug).emit("chat:typing", event)
+        }),
+    )
+
+    this.subscriptions.push(
+      this.meetingTyping$
+        .pipe(
+          throttleTime(600, undefined, {
+            leading: true,
+            trailing: true,
+          }),
+        )
+        .subscribe((event) => {
+          const room = this.meetingRoomSlug(event.meetingId)
+          this.server.to(room).emit("meeting:typing", event)
         }),
     )
 
@@ -157,6 +212,7 @@ export class ChatGateway
         (payload.name as string) ??
         (payload.preferred_username as string) ??
         userId
+      socket.data.email = (payload.email as string) ?? null
 
       socket.join(`user:${userId}`)
       socket.emit("user:presence", { userId, status: "online" })
@@ -176,7 +232,14 @@ export class ChatGateway
         .to(`user:${userId}`)
         .emit("user:presence", { userId, status: "away" })
       const rooms = socket.data.rooms ?? new Set<string>()
-      rooms.forEach((roomSlug) => this.decrementUserRoom(userId, roomSlug))
+      const meetingIds = new Set<string>()
+      rooms.forEach((roomSlug) => {
+        this.decrementUserRoom(userId, roomSlug)
+        if (roomSlug.startsWith("meeting:")) {
+          meetingIds.add(roomSlug.replace("meeting:", ""))
+        }
+      })
+      meetingIds.forEach((meetingId) => this.emitMeetingPresence(meetingId))
       socket.data.rooms?.clear()
     }
   }
@@ -220,6 +283,55 @@ export class ChatGateway
     }
   }
 
+  @SubscribeMessage("meeting:join")
+  async joinMeeting(
+    @MessageBody() payload: { meetingId: string },
+    @ConnectedSocket() socket: ChatSocket,
+  ) {
+    if (!payload?.meetingId) {
+      return
+    }
+    const userId = socket.data.userId
+    if (!userId) {
+      return
+    }
+    try {
+      await this.meetingChat.ensureMembership(payload.meetingId, {
+        id: userId,
+        email: socket.data.email ?? undefined,
+        name: socket.data.name,
+      })
+      const roomSlug = this.meetingRoomSlug(payload.meetingId)
+      socket.join(roomSlug)
+      socket.data.rooms = socket.data.rooms ?? new Set<string>()
+      socket.data.rooms.add(roomSlug)
+      this.incrementUserRoom(userId, roomSlug)
+      this.emitMeetingPresence(payload.meetingId)
+    } catch (error) {
+      socket.emit("meeting:error", {
+        message: (error as Error).message,
+      })
+    }
+  }
+
+  @SubscribeMessage("meeting:leave")
+  leaveMeeting(
+    @MessageBody() payload: { meetingId: string },
+    @ConnectedSocket() socket: ChatSocket,
+  ) {
+    if (!payload?.meetingId) {
+      return
+    }
+    const roomSlug = this.meetingRoomSlug(payload.meetingId)
+    socket.leave(roomSlug)
+    socket.data.rooms?.delete(roomSlug)
+    const userId = socket.data.userId
+    if (userId) {
+      this.decrementUserRoom(userId, roomSlug)
+      this.emitMeetingPresence(payload.meetingId)
+    }
+  }
+
   @SubscribeMessage("chat:typing")
   handleTyping(
     @MessageBody() payload: { roomSlug: string },
@@ -230,6 +342,24 @@ export class ChatGateway
     }
     this.typing$.next({
       roomSlug: payload.roomSlug,
+      userId: socket.data.userId,
+      name: socket.data.name,
+    })
+  }
+
+  @SubscribeMessage("meeting:typing")
+  handleMeetingTyping(
+    @MessageBody() payload: { meetingId: string },
+    @ConnectedSocket() socket: ChatSocket,
+  ) {
+    if (!payload?.meetingId) {
+      return
+    }
+    if (!socket.data.userId) {
+      return
+    }
+    this.meetingTyping$.next({
+      meetingId: payload.meetingId,
       userId: socket.data.userId,
       name: socket.data.name,
     })
@@ -266,6 +396,48 @@ export class ChatGateway
       })
     } catch (error) {
       socket.emit("chat:error", {
+        message: (error as Error).message,
+      })
+    }
+  }
+
+  @SubscribeMessage("meeting:read")
+  async handleMeetingRead(
+    @MessageBody() payload: { meetingId: string; messageIds: string[] },
+    @ConnectedSocket() socket: ChatSocket,
+  ) {
+    if (!payload?.meetingId || !Array.isArray(payload.messageIds)) {
+      return
+    }
+    const userId = socket.data.userId
+    if (!userId) {
+      return
+    }
+    try {
+      const updates = await this.meetingChat.markMessagesRead({
+        meetingId: payload.meetingId,
+        viewer: {
+          id: userId,
+          email: socket.data.email ?? undefined,
+          name: socket.data.name,
+        },
+        messageIds: payload.messageIds,
+      })
+      if (!updates.length) {
+        return
+      }
+      const roomSlug = this.meetingRoomSlug(payload.meetingId)
+      const formattedUpdates = updates.map((update) => ({
+        messageId: update.id,
+        readBy: update.readBy,
+      }))
+      this.server.to(roomSlug).emit("meeting:read", {
+        meetingId: payload.meetingId,
+        userId,
+        updates: formattedUpdates,
+      })
+    } catch (error) {
+      socket.emit("meeting:error", {
         message: (error as Error).message,
       })
     }
@@ -315,9 +487,7 @@ export class ChatGateway
       })
 
       notifications.forEach((notification) => {
-        this.server
-          .to(`user:${notification.userId}`)
-          .emit("notification:new", notification)
+        this.emitNotification(notification)
       })
     } catch (error) {
       socket.emit("chat:error", {
@@ -326,8 +496,73 @@ export class ChatGateway
     }
   }
 
+  @SubscribeMessage("meeting:send")
+  async handleMeetingSend(
+    @MessageBody()
+    payload: { meetingId: string; body: string; clientMessageId?: string },
+    @ConnectedSocket() socket: ChatSocket,
+  ) {
+    if (!payload?.meetingId || !payload.body) {
+      return
+    }
+    const userId = socket.data.userId
+    if (!userId) {
+      return
+    }
+    const trimmed = payload.body.trim()
+    if (!trimmed) {
+      return
+    }
+    try {
+      const { message, meetingId, recipients, meetingTitle } =
+        await this.meetingChat.createMessage({
+          meetingId: payload.meetingId,
+          viewer: {
+            id: userId,
+            email: socket.data.email ?? undefined,
+            name: socket.data.name,
+          },
+          body: trimmed,
+          clientMessageId: payload.clientMessageId,
+        })
+      const roomSlug = this.meetingRoomSlug(meetingId)
+      this.server.to(roomSlug).emit("meeting:new", message)
+
+      const offlineRecipients = recipients.filter(
+        (recipient) => !this.isUserWatchingRoom(recipient, roomSlug),
+      )
+
+      if (offlineRecipients.length) {
+        const notifications =
+          await this.notifications.createMeetingChatNotifications({
+            recipients: offlineRecipients,
+            meetingId,
+            meetingTitle,
+            message,
+          })
+        notifications.forEach((notification) => {
+          this.emitNotification(notification)
+        })
+      }
+    } catch (error) {
+      socket.emit("meeting:error", {
+        message: (error as Error).message,
+        clientMessageId: payload.clientMessageId,
+      })
+    }
+  }
+
   onModuleDestroy() {
     this.subscriptions.forEach((sub) => sub.unsubscribe())
+  }
+
+  emitNotification(notification: ChatNotificationPayload) {
+    if (!notification?.userId) {
+      return
+    }
+    this.server
+      .to(`user:${notification.userId}`)
+      .emit("notification:new", notification)
   }
 
   private extractToken(socket: ChatSocket) {
@@ -340,6 +575,10 @@ export class ChatGateway
       return auth
     }
     return undefined
+  }
+
+  private meetingRoomSlug(meetingId: string) {
+    return `meeting:${meetingId}`
   }
 
   private incrementUserRoom(userId: string, roomSlug: string) {
@@ -367,5 +606,20 @@ export class ChatGateway
 
   private isUserWatchingRoom(userId: string, roomSlug: string) {
     return (this.userRooms.get(userId)?.get(roomSlug) ?? 0) > 0
+  }
+
+  private emitMeetingPresence(meetingId: string) {
+    const roomSlug = this.meetingRoomSlug(meetingId)
+    const userCount =
+      this.server.sockets.adapter.rooms.get(roomSlug)?.size ?? 0
+    this.server
+      .to(roomSlug)
+      .emit("meeting:presence", { meetingId, userCount })
+  }
+
+  emitCalendarSync(userId: string, providerSyncedAt: string) {
+    this.server
+      .to(`user:${userId}`)
+      .emit("calendar:sync", { userId, providerSyncedAt })
   }
 }

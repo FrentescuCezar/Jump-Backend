@@ -17,6 +17,9 @@ import { ScheduleModule } from "@nestjs/schedule"
 import { IntegrationsModule } from "./integrations/integrations.module"
 import { CalendarModule } from "./calendar/calendar.module"
 import { RecallModule } from "./recall/recall.module"
+import { MeetingsModule } from "./meetings/meetings.module"
+import { AutomationsModule } from "./automations/automations.module"
+import { SocialModule } from "./social/social.module"
 import { OnboardingModule } from "./onboarding/onboarding.module"
 
 @Module({
@@ -38,6 +41,9 @@ import { OnboardingModule } from "./onboarding/onboarding.module"
     IntegrationsModule,
     CalendarModule,
     RecallModule,
+    MeetingsModule,
+    AutomationsModule,
+    SocialModule,
     OnboardingModule,
     KeycloakConnectModule.registerAsync({
       useFactory: (configService: ConfigService) => {

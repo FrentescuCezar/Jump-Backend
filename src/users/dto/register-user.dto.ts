@@ -38,10 +38,4 @@ export class RegisterUserDto {
       "Password must include an uppercase letter, a number, and a special character.",
   })
   password!: string
-
-  @ApiProperty({ example: "toyota" })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
-  brand!: string
 }

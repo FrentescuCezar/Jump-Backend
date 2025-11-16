@@ -34,7 +34,7 @@ export interface ChatNotificationPayload {
   body: string
   roomSlug: string | null
   messageId: string | null
+  payload?: Record<string, unknown> | null
   readAt: string | null
   createdAt: string
 }
-

@@ -12,7 +12,7 @@ services:
     volumes:
       - ../../:/app
       - backend-node-modules:/app/node_modules
-      - ../../generated:/app/generated
+      - backend-generated:/app/generated
     networks:
       - jump-network
     healthcheck:
@@ -24,6 +24,7 @@ services:
 
 volumes:
   backend-node-modules:
+  backend-generated:
 
 networks:
   jump-network:

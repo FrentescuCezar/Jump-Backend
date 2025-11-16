@@ -26,7 +26,3 @@ export const MOCK_EXPERIMENTS: PulseExperiment[] = [
     impact: "Cuts project lookup time by 45%",
   },
 ]
-
-
-
-

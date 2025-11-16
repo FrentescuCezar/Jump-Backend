@@ -1,11 +1,5 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "outDir": "./dist"
-  },
-  "include": ["src/**/*", "prisma/**/*"],
   "exclude": [
     "node_modules",
     "node_modules.root",

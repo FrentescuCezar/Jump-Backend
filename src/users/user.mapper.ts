@@ -8,7 +8,6 @@ export class UserMapper {
       keycloakId: user.keycloakId,
       email: user.email,
       name: user.name,
-      brand: user.brand,
       createdAt: user.createdAt,
     }
   }

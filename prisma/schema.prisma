@@ -14,18 +14,18 @@ datasource db {
 }
 
 model User {
-  id                   String    @id @default(uuid())
-  keycloakId           String    @unique
-  email                String    @unique
-  name                 String
-  brand                String
-  createdAt            DateTime  @default(now())
+  id         String   @id @default(uuid())
+  keycloakId String   @unique
+  email      String   @unique
+  name       String
   onboardingCompletedAt DateTime?
-  updatedAt            DateTime  @updatedAt
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
   connectedAccounts ConnectedAccount[]
   calendarEvents    CalendarEvent[]
   meetingPreference MeetingPreference?
   automations       Automation[]
+  automationPreference AutomationPreference?
   socialPosts       SocialPost[]
 }
 
@@ -94,6 +94,42 @@ model ChatMessage {
   @@index([roomId, createdAt])
 }
 
+model MeetingChatThread {
+  id               String     @id @default(cuid())
+  calendarEventId  String     @unique
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  messages         MeetingChatMessage[]
+  calendarEvent    CalendarEvent @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+
+  @@index([calendarEventId])
+}
+
+model MeetingChatMessage {
+  id          String    @id @default(cuid())
+  threadId    String
+  senderId    String
+  senderName  String
+  senderEmail String?
+  body        String
+  createdAt   DateTime  @default(now())
+  thread      MeetingChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  receipts    MeetingChatReceipt[]
+
+  @@index([threadId, createdAt])
+}
+
+model MeetingChatReceipt {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  createdAt DateTime @default(now())
+  message   MeetingChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId])
+}
+
 enum ConnectedProvider {
   GOOGLE_CALENDAR
   LINKEDIN
@@ -160,6 +196,11 @@ model ConnectedAccount {
   refreshToken       String?
   expiresAt          DateTime?
   lastSyncedAt       DateTime?
+  calendarSyncToken       String?
+  calendarChannelId       String?
+  calendarChannelToken    String?
+  calendarResourceId      String?
+  calendarChannelExpiresAt DateTime?
   metadata           Json?
   linkedAt           DateTime          @default(now())
   createdAt          DateTime          @default(now())
@@ -168,6 +209,8 @@ model ConnectedAccount {
   calendarEvents     CalendarEvent[]
 
   @@index([userId, provider])
+  @@index([calendarChannelId])
+  @@index([calendarResourceId])
   @@unique([provider, providerAccountId])
 }
 
@@ -176,6 +219,17 @@ model MeetingPreference {
   userId              String   @unique
   leadMinutes         Int      @default(10)
   defaultNotetaker    Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AutomationPreference {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  generateTranscripts Boolean  @default(true)
+  createEmailDrafts   Boolean  @default(true)
+  generateSocialPosts Boolean  @default(false)
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
   user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -208,15 +262,19 @@ model CalendarEvent {
   metadata            Json?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
+  deletedAt           DateTime?
   user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   connectedAccount    ConnectedAccount    @relation(fields: [connectedAccountId], references: [id], onDelete: Cascade)
   recallBot           RecallBot?
   meetingInsights     MeetingInsight[]
   socialPosts         SocialPost[]
+  meetingShares       MeetingShare[]
+  meetingChatThread   MeetingChatThread?
 
   @@unique([connectedAccountId, externalEventId])
   @@index([userId, startTime])
   @@index([deduplicationKey])
+  @@index([userId, deletedAt])
 }
 
 model RecallBot {
@@ -290,6 +348,7 @@ model SocialPost {
   status          SocialPostStatus @default(DRAFT)
   error           String?
   externalPostId  String?
+  externalUrl     String?
   publishedAt     DateTime?
   metadata        Json?
   createdAt       DateTime         @default(now())
@@ -300,6 +359,19 @@ model SocialPost {
 
   @@index([calendarEventId, status])
   @@index([userId, channel])
+}
+
+model MeetingShare {
+  id               String         @id @default(uuid())
+  calendarEventId  String
+  email            String
+  invitedByUserId  String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  calendarEvent    CalendarEvent  @relation(fields: [calendarEventId], references: [id], onDelete: Cascade)
+
+  @@index([calendarEventId])
+  @@unique([calendarEventId, email])
 }
 
 model Notification {

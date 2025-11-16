@@ -11,5 +11,3 @@ export class MarkMessagesReadDto {
   @IsString({ each: true })
   messageIds!: string[]
 }
-
-
