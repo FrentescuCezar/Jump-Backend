@@ -19,6 +19,7 @@ type GoogleProfile = {
 
 interface StatePayload extends JwtPayload {
   userId: string
+  redirectPath?: string
 }
 
 @Injectable()
@@ -60,8 +61,11 @@ export class GoogleOAuthService {
     ]
   }
 
-  buildAuthorizationUrl(userId: string) {
-    const state = this.signState({ userId })
+  buildAuthorizationUrl(userId: string, redirectPath?: string) {
+    const state = this.signState({
+      userId,
+      redirectPath: this.sanitizeRedirectPath(redirectPath),
+    })
     return this.oauthClient.generateAuthUrl({
       access_type: "offline",
       scope: this.scopes,
@@ -122,7 +126,10 @@ export class GoogleOAuthService {
       },
     )
 
-    return { account, redirectUri: this.settingsRedirectBase }
+    return {
+      account,
+      redirectUri: this.resolveRedirectUri(state.redirectPath),
+    }
   }
 
   private signState(payload: StatePayload) {
@@ -160,6 +167,29 @@ export class GoogleOAuthService {
       })
     }
     return client
+  }
+
+  private sanitizeRedirectPath(path?: string) {
+    if (!path || !path.startsWith("/")) {
+      return undefined
+    }
+    return path
+  }
+
+  private resolveRedirectUri(redirectPath?: string) {
+    if (!redirectPath) {
+      return this.settingsRedirectBase
+    }
+
+    try {
+      const url = new URL(redirectPath, this.appOrigin)
+      if (url.origin !== this.appOrigin) {
+        return this.settingsRedirectBase
+      }
+      return url.toString()
+    } catch {
+      return this.settingsRedirectBase
+    }
   }
 
   get settingsRedirectBase() {

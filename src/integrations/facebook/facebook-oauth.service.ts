@@ -7,6 +7,7 @@ import { ConnectedAccountsService } from "../connected-accounts.service"
 
 interface StatePayload extends JwtPayload {
   userId: string
+  redirectPath?: string
 }
 
 type FacebookTokenResponse = {
@@ -64,8 +65,11 @@ export class FacebookOAuthService {
     this.appOrigin = this.configService.getOrThrow<string>("APP_ORIGIN")
   }
 
-  buildAuthorizationUrl(userId: string) {
-    const state = this.signState({ userId })
+  buildAuthorizationUrl(userId: string, redirectPath?: string) {
+    const state = this.signState({
+      userId,
+      redirectPath: this.sanitizeRedirectPath(redirectPath),
+    })
     const params = new URLSearchParams({
       client_id: this.clientId,
       redirect_uri: this.redirectUri,
@@ -123,7 +127,10 @@ export class FacebookOAuthService {
       )
       this.logger.log("Account upserted successfully")
 
-      return { account, redirectUri: this.settingsRedirectBase }
+      return {
+        account,
+        redirectUri: this.resolveRedirectUri(state.redirectPath),
+      }
     } catch (error) {
       this.logger.error(
         `Error in handleCallback: ${
@@ -143,10 +150,9 @@ export class FacebookOAuthService {
       code,
     })
     try {
-      const { data } =
-        await this.http.axiosRef.get<FacebookTokenResponse>(
-          `https://graph.facebook.com/${this.graphVersion}/oauth/access_token?${params.toString()}`,
-        )
+      const { data } = await this.http.axiosRef.get<FacebookTokenResponse>(
+        `https://graph.facebook.com/${this.graphVersion}/oauth/access_token?${params.toString()}`,
+      )
       return data
     } catch (error: any) {
       this.logger.error(
@@ -171,10 +177,9 @@ export class FacebookOAuthService {
       fb_exchange_token: shortLivedToken,
     })
     try {
-      const { data } =
-        await this.http.axiosRef.get<FacebookTokenResponse>(
-          `https://graph.facebook.com/${this.graphVersion}/oauth/access_token?${params.toString()}`,
-        )
+      const { data } = await this.http.axiosRef.get<FacebookTokenResponse>(
+        `https://graph.facebook.com/${this.graphVersion}/oauth/access_token?${params.toString()}`,
+      )
       return data
     } catch (error: any) {
       this.logger.error(
@@ -234,10 +239,29 @@ export class FacebookOAuthService {
     return payload
   }
 
+  private sanitizeRedirectPath(path?: string) {
+    if (!path || !path.startsWith("/")) {
+      return undefined
+    }
+    return path
+  }
+
+  private resolveRedirectUri(redirectPath?: string) {
+    if (!redirectPath) {
+      return this.settingsRedirectBase
+    }
+    try {
+      const url = new URL(redirectPath, this.appOrigin)
+      if (url.origin !== this.appOrigin) {
+        return this.settingsRedirectBase
+      }
+      return url.toString()
+    } catch {
+      return this.settingsRedirectBase
+    }
+  }
+
   get settingsRedirectBase() {
     return `${this.appOrigin}/settings/integrations?provider=facebook`
   }
 }
-
-
-

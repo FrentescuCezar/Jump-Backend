@@ -7,6 +7,7 @@ import { ConnectedAccountsService } from "../connected-accounts.service"
 
 interface StatePayload extends JwtPayload {
   userId: string
+  redirectPath?: string
 }
 
 type LinkedInTokenResponse = {
@@ -45,8 +46,11 @@ export class LinkedInOAuthService {
     this.appOrigin = this.configService.getOrThrow<string>("APP_ORIGIN")
   }
 
-  buildAuthorizationUrl(userId: string) {
-    const state = this.signState({ userId })
+  buildAuthorizationUrl(userId: string, redirectPath?: string) {
+    const state = this.signState({
+      userId,
+      redirectPath: this.sanitizeRedirectPath(redirectPath),
+    })
     const params = new URLSearchParams({
       response_type: "code",
       client_id: this.clientId,
@@ -117,7 +121,10 @@ export class LinkedInOAuthService {
       )
       this.logger.log("Account upserted successfully")
 
-      return { account, redirectUri: this.settingsRedirectBase }
+      return {
+        account,
+        redirectUri: this.resolveRedirectUri(state.redirectPath),
+      }
     } catch (error) {
       this.logger.error(
         `Error in handleCallback: ${
@@ -327,6 +334,28 @@ export class LinkedInOAuthService {
       throw new Error("Invalid LinkedIn state payload")
     }
     return payload
+  }
+
+  private sanitizeRedirectPath(path?: string) {
+    if (!path || !path.startsWith("/")) {
+      return undefined
+    }
+    return path
+  }
+
+  private resolveRedirectUri(redirectPath?: string) {
+    if (!redirectPath) {
+      return this.settingsRedirectBase
+    }
+    try {
+      const url = new URL(redirectPath, this.appOrigin)
+      if (url.origin !== this.appOrigin) {
+        return this.settingsRedirectBase
+      }
+      return url.toString()
+    } catch {
+      return this.settingsRedirectBase
+    }
   }
 
   get settingsRedirectBase() {

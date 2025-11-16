@@ -13,6 +13,16 @@ import { CalendarSyncService } from "../../calendar/calendar-sync.service"
 import { CurrentDbUser } from "../../users/decorators/current-db-user.decorator"
 import type { User } from "@prisma/client"
 
+function buildRedirectUrl(baseUrl: string, params: Record<string, string>) {
+  const url = new URL(baseUrl)
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, value)
+    }
+  })
+  return url.toString()
+}
+
 @ApiTags("Integrations")
 @Controller("integrations/google/oauth")
 export class GoogleOAuthController {
@@ -22,8 +32,11 @@ export class GoogleOAuthController {
   ) {}
 
   @Get("url")
-  async getAuthUrl(@CurrentDbUser() user: User) {
-    const url = this.googleOAuth.buildAuthorizationUrl(user.id)
+  async getAuthUrl(
+    @CurrentDbUser() user: User,
+    @Query("redirect") redirect?: string,
+  ) {
+    const url = this.googleOAuth.buildAuthorizationUrl(user.id, redirect)
     return { url }
   }
 
@@ -39,16 +52,24 @@ export class GoogleOAuthController {
     }
 
     try {
-      const { redirectUri, account } =
+      const { account, redirectUri } =
         await this.googleOAuth.handleOAuthCallback(code, state)
       if (account?.id) {
         await this.calendarSync.syncAccountById(account.id)
       }
-      return res.redirect(`${redirectUri}&status=success`)
+      return res.redirect(
+        buildRedirectUrl(redirectUri, {
+          status: "success",
+        }),
+      )
     } catch (error) {
       console.error("Google OAuth error", error)
       const redirectBase = this.googleOAuth.settingsRedirectBase
-      return res.redirect(`${redirectBase}&status=error`)
+      return res.redirect(
+        buildRedirectUrl(redirectBase, {
+          status: "error",
+        }),
+      )
     }
   }
 }

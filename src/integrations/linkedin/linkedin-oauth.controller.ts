@@ -13,6 +13,16 @@ import type { User } from "@prisma/client"
 import { LinkedInOAuthService } from "./linkedin-oauth.service"
 import { CurrentDbUser } from "../../users/decorators/current-db-user.decorator"
 
+function buildRedirectUrl(baseUrl: string, params: Record<string, string>) {
+  const url = new URL(baseUrl)
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, value)
+    }
+  })
+  return url.toString()
+}
+
 @ApiTags("Integrations")
 @Controller("integrations/linkedin/oauth")
 export class LinkedInOAuthController {
@@ -21,8 +31,11 @@ export class LinkedInOAuthController {
   constructor(private readonly linkedInOAuth: LinkedInOAuthService) {}
 
   @Get("url")
-  async getUrl(@CurrentDbUser() user: User) {
-    const url = this.linkedInOAuth.buildAuthorizationUrl(user.id)
+  async getUrl(
+    @CurrentDbUser() user: User,
+    @Query("redirect") redirect?: string,
+  ) {
+    const url = this.linkedInOAuth.buildAuthorizationUrl(user.id, redirect)
     return { url }
   }
 
@@ -41,22 +54,30 @@ export class LinkedInOAuthController {
         `LinkedIn OAuth error: ${error} - ${errorDescription || "No description"}`,
       )
       return res.redirect(
-        `${this.linkedInOAuth.settingsRedirectBase}&status=error&error=${encodeURIComponent(error)}&description=${encodeURIComponent(errorDescription || "")}`,
+        buildRedirectUrl(this.linkedInOAuth.settingsRedirectBase, {
+          status: "error",
+          error,
+          description: errorDescription || "",
+        }),
       )
     }
 
     if (!code || !state) {
-      this.logger.warn("Missing OAuth parameters", { code: !!code, state: !!state })
+      this.logger.warn("Missing OAuth parameters", {
+        code: !!code,
+        state: !!state,
+      })
       throw new BadRequestException("Missing OAuth parameters")
     }
 
     try {
       this.logger.log("Processing LinkedIn OAuth callback")
-      await this.linkedInOAuth.handleCallback(code, state)
-      this.logger.log("LinkedIn OAuth callback successful")
-      return res.redirect(
-        `${this.linkedInOAuth.settingsRedirectBase}&status=success`,
+      const { redirectUri } = await this.linkedInOAuth.handleCallback(
+        code,
+        state,
       )
+      this.logger.log("LinkedIn OAuth callback successful")
+      return res.redirect(buildRedirectUrl(redirectUri, { status: "success" }))
     } catch (error) {
       this.logger.error(
         `LinkedIn OAuth callback failed: ${
@@ -65,10 +86,11 @@ export class LinkedInOAuthController {
         error instanceof Error ? error.stack : undefined,
       )
       return res.redirect(
-        `${this.linkedInOAuth.settingsRedirectBase}&status=error&message=${encodeURIComponent(error instanceof Error ? error.message : String(error))}`,
+        buildRedirectUrl(this.linkedInOAuth.settingsRedirectBase, {
+          status: "error",
+          message: error instanceof Error ? error.message : String(error),
+        }),
       )
     }
   }
 }
-
-

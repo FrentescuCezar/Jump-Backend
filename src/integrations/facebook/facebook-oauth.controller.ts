@@ -13,6 +13,16 @@ import type { User } from "@prisma/client"
 import { FacebookOAuthService } from "./facebook-oauth.service"
 import { CurrentDbUser } from "../../users/decorators/current-db-user.decorator"
 
+function buildRedirectUrl(baseUrl: string, params: Record<string, string>) {
+  const url = new URL(baseUrl)
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, value)
+    }
+  })
+  return url.toString()
+}
+
 @ApiTags("Integrations")
 @Controller("integrations/facebook/oauth")
 export class FacebookOAuthController {
@@ -21,8 +31,13 @@ export class FacebookOAuthController {
   constructor(private readonly facebookOAuth: FacebookOAuthService) {}
 
   @Get("url")
-  async getUrl(@CurrentDbUser() user: User) {
-    return { url: this.facebookOAuth.buildAuthorizationUrl(user.id) }
+  async getUrl(
+    @CurrentDbUser() user: User,
+    @Query("redirect") redirect?: string,
+  ) {
+    return {
+      url: this.facebookOAuth.buildAuthorizationUrl(user.id, redirect),
+    }
   }
 
   @Get("callback")
@@ -41,22 +56,30 @@ export class FacebookOAuthController {
         `Facebook OAuth error: ${error} - ${errorDescription || errorReason || "No description"}`,
       )
       return res.redirect(
-        `${this.facebookOAuth.settingsRedirectBase}&status=error&error=${encodeURIComponent(error)}&description=${encodeURIComponent(errorDescription || errorReason || "")}`,
+        buildRedirectUrl(this.facebookOAuth.settingsRedirectBase, {
+          status: "error",
+          error,
+          description: errorDescription || errorReason || "",
+        }),
       )
     }
 
     if (!code || !state) {
-      this.logger.warn("Missing OAuth parameters", { code: !!code, state: !!state })
+      this.logger.warn("Missing OAuth parameters", {
+        code: !!code,
+        state: !!state,
+      })
       throw new BadRequestException("Missing OAuth parameters")
     }
 
     try {
       this.logger.log("Processing Facebook OAuth callback")
-      await this.facebookOAuth.handleCallback(code, state)
-      this.logger.log("Facebook OAuth callback successful")
-      return res.redirect(
-        `${this.facebookOAuth.settingsRedirectBase}&status=success`,
+      const { redirectUri } = await this.facebookOAuth.handleCallback(
+        code,
+        state,
       )
+      this.logger.log("Facebook OAuth callback successful")
+      return res.redirect(buildRedirectUrl(redirectUri, { status: "success" }))
     } catch (error) {
       this.logger.error(
         `Facebook OAuth callback failed: ${
@@ -65,11 +88,11 @@ export class FacebookOAuthController {
         error instanceof Error ? error.stack : undefined,
       )
       return res.redirect(
-        `${this.facebookOAuth.settingsRedirectBase}&status=error&message=${encodeURIComponent(error instanceof Error ? error.message : String(error))}`,
+        buildRedirectUrl(this.facebookOAuth.settingsRedirectBase, {
+          status: "error",
+          message: error instanceof Error ? error.message : String(error),
+        }),
       )
     }
   }
 }
-
-
-
