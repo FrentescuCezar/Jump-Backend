@@ -19,4 +19,3 @@ import type { KeycloakPrincipal } from "./keycloak-user.type"
 export interface AuthenticatedRequest extends Request {
   user: KeycloakPrincipal
 }
-
